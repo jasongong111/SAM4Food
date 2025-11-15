@@ -4,34 +4,48 @@
 
 echo "Setting up SAM Food Segmentation Project..."
 
-# Check Python version
-python_version=$(python3 --version 2>&1 | awk '{print $2}' | cut -d. -f1,2)
-required_version="3.8"
-
-if [ "$(printf '%s\n' "$required_version" "$python_version" | sort -V | head -n1)" = "$required_version" ]; then
-    echo "✅ Python version $python_version is compatible"
-else
-    echo "❌ Python version $python_version is not compatible. Please install Python 3.8+"
+# Check if conda is installed
+if ! command -v conda &> /dev/null; then
+    echo "❌ Conda is not installed. Please install Anaconda or Miniconda first."
+    echo "   Visit: https://docs.conda.io/en/latest/miniconda.html"
     exit 1
 fi
 
-# Create virtual environment if it doesn't exist
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
+echo "✅ Conda found: $(conda --version)"
+
+# Initialize conda for bash shell (if not already initialized)
+eval "$(conda shell.bash hook)"
+
+# Check if environment already exists
+if conda env list | grep -q "^sam4food "; then
+    echo "⚠️  Conda environment 'sam4food' already exists."
+    echo "Activating existing environment..."
+    conda activate sam4food
+    echo "✅ Environment activated"
+    echo ""
+    echo "To recreate the environment, run: conda env remove -n sam4food -y && bash setup.sh"
+    echo ""
+    echo "Continuing with existing environment..."
+    # Continue with rest of setup (checkpoints, directories, etc.)
+else
+    # Create conda environment from environment.yml
+    if [ -f "environment.yml" ]; then
+        echo "Creating conda environment from environment.yml..."
+        conda env create -f environment.yml
+    else
+        echo "❌ environment.yml not found. Creating environment manually..."
+        conda create -n sam4food python=3.10 -y
+        conda activate sam4food
+        echo "Installing requirements..."
+        pip install -r requirements.txt
+    fi
+    
+    # Activate the environment
+    echo "Activating conda environment..."
+    conda activate sam4food
+    
+    echo "✅ Conda environment 'sam4food' is ready!"
 fi
-
-# Activate virtual environment
-echo "Activating virtual environment..."
-source venv/bin/activate
-
-# Upgrade pip
-echo "Upgrading pip..."
-pip install --upgrade pip
-
-# Install requirements
-echo "Installing requirements..."
-pip install -r requirements.txt
 
 # Download SAM checkpoint if needed
 echo "Checking SAM checkpoints..."
@@ -57,6 +71,9 @@ export CUDA_VISIBLE_DEVICES=0
 
 echo ""
 echo "🎉 Setup complete!"
+echo ""
+echo "To activate the conda environment in future sessions, run:"
+echo "  conda activate sam4food"
 echo ""
 echo "Next steps:"
 echo "1. Download FoodSeg103 dataset to data/FoodSeg103/"

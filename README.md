@@ -37,12 +37,12 @@ Fine-tune SAM on FoodSeg103 using efficient LoRA adaptations to achieve mIoU > 0
 git clone <repository-url>
 cd sam-food-segmentation
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\\Scripts\\activate
+# Run setup script (uses conda)
+bash setup.sh
 
-# Install dependencies
-pip install -r requirements.txt
+# Or manually create conda environment
+conda env create -f environment.yml
+conda activate sam4food
 ```
 
 ### 2. Setup Dataset
