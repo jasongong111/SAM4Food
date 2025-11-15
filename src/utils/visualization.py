@@ -69,6 +69,7 @@ class Visualizer:
                     'point_labels': batch['prompts']['point_labels'].to(device)
                 }
                 pred_masks = model.sam_model(image_features, prompts)
+                pred_masks = model.resize_predictions(pred_masks, mask.shape[-2:])
                 
                 # Process each sample in the batch
                 batch_size = image.size(0)

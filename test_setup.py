@@ -7,8 +7,10 @@ import sys
 import torch
 from pathlib import Path
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent / "src"))
+# Ensure root directory is in path for imports
+root_dir = Path(__file__).parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 def test_imports():
     """Test if all modules can be imported"""

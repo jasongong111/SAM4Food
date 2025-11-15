@@ -45,7 +45,25 @@ conda env create -f environment.yml
 conda activate sam4food
 ```
 
-### 2. Setup Dataset
+### 2. Download SAM Model Checkpoints
+
+**Required**: Download the SAM model checkpoint manually before training:
+
+```bash
+# Download SAM checkpoints (choose one based on model size):
+# ViT-B (smallest, fastest, recommended for most cases)
+wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+
+# ViT-L (medium)
+wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
+
+# ViT-H (largest, best quality)
+wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
+```
+
+**Note**: The checkpoint path must be provided via `--model_path` argument when running training/evaluation.
+
+### 3. Setup Dataset
 
 ```bash
 # Download FoodSeg103 manually from:
@@ -53,29 +71,35 @@ conda activate sam4food
 
 # Expected structure:
 data/FoodSeg103/
-├── images/
-├── masks/
-└── annotations.json
+├── Images/
+│   ├── img_dir/
+│   │   ├── train/
+│   │   └── test/
+│   └── ann_dir/
+│       ├── train/
+│       └── test/
+├── ImageSets/
+│   ├── train.txt
+│   └── test.txt
+└── category_id.txt
 ```
 
-### 3. Basic Training
+### 4. Basic Training
 
 ```bash
-# Train with default settings
-python main.py --mode train --model_name vit_b --epochs 50
+# Train with default settings (model_path is required)
+python main.py --mode train --model_name vit_b --model_path sam_vit_b_01ec64.pth --epochs 50
 
 # Train with custom hyperparameters
-python main.py --mode train --model_name vit_b --epochs 100 --learning_rate 5e-5 --batch_size 8
+python main.py --mode train --model_name vit_b --model_path sam_vit_b_01ec64.pth --epochs 100 --learning_rate 5e-5 --batch_size 8
 ```
 
-### 4. Complete Pipeline
-
+### 5. Complete Pipeline
 ```bash
 # Run full pipeline (train + evaluate + visualize)
-python main.py --mode full --model_name vit_b --epochs 50
 
 # Resume training from checkpoint
-python main.py --mode train --resume checkpoints/best_model.pth --epochs 100
+python main.py --mode train --model_path sam_vit_b_01ec64.pth --resume checkpoints/best_model.pth --epochs 100
 ```
 
 ## 📊 Usage Examples
@@ -253,7 +277,7 @@ config.system.debug = True
 config.system.max_samples_for_debug = 100
 
 # Quick training run
-python main.py --mode train --debug --epochs 5
+python main.py --mode train --model_path sam_vit_b_01ec64.pth --debug --epochs 5
 ```
 
 ### Multiple Model Comparison

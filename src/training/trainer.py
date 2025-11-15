@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -22,7 +22,7 @@ import json
 
 from ..models.sam_lora import SAMLoRAModel
 from ..data.foodseg_dataset import create_data_loaders
-from ..configs.config import Config
+from configs.config import Config
 from ..utils.metrics import calculate_miou, calculate_dice
 
 
@@ -127,7 +127,10 @@ class Trainer:
         self.scheduler = self._setup_scheduler()
         
         # Initialize scaler for mixed precision
-        self.scaler = GradScaler(enabled=config.training.use_mixed_precision)
+        if config.training.use_mixed_precision and self.device.type == 'cuda':
+            self.scaler = GradScaler('cuda', enabled=True)
+        else:
+            self.scaler = GradScaler('cpu', enabled=False)
         
         # Initialize data loaders
         self.train_loader, self.val_loader = create_data_loaders(config)
@@ -151,8 +154,56 @@ class Trainer:
         if len(trainable_params) == 0:
             raise ValueError("No trainable parameters found!")
         
-        # Group parameters for differential learning rates if needed
-        params = [p for group in trainable_params for p in group['params']]
+        # Filter parameters - ensure they're leaf tensors for optimizer
+        # PEFT models should have leaf tensors, but we check to be safe
+        params = []
+        non_leaf_params = []
+        
+        for p in trainable_params:
+            if p.requires_grad:
+                if p.is_leaf:
+                    params.append(p)
+                else:
+                    non_leaf_params.append(p)
+        
+        # If we have non-leaf parameters, we need to handle them differently
+        # The issue is that PyTorch optimizers require leaf tensors
+        if non_leaf_params:
+            print(f"⚠️  Warning: Found {len(non_leaf_params)} non-leaf parameters")
+            print("  Attempting to extract leaf parameters from PEFT model...")
+            
+            # Try to get the actual trainable parameters from PEFT adapters
+            # PEFT stores LoRA weights in the model's state_dict
+            try:
+                # Get state dict and recreate parameters
+                for name, param in self.model.mask_decoder.named_parameters():
+                    if param.requires_grad and 'lora' in name.lower():
+                        # LoRA parameters should be leaf tensors
+                        if param.is_leaf:
+                            if param not in params:
+                                params.append(param)
+                
+                # Also check prompt encoder if it has LoRA
+                if hasattr(self.model.prompt_encoder, 'peft_config'):
+                    for name, param in self.model.prompt_encoder.named_parameters():
+                        if param.requires_grad and 'lora' in name.lower():
+                            if param.is_leaf:
+                                if param not in params:
+                                    params.append(param)
+            except Exception as e:
+                print(f"  Could not extract leaf parameters: {e}")
+        
+        if len(params) == 0:
+            raise ValueError(
+                "No valid trainable parameters found! "
+                "All parameters are non-leaf tensors. "
+                "This may indicate an issue with PEFT/LoRA setup."
+            )
+        
+        print(f"Setting up optimizer with {len(params)} parameter groups")
+        print(f"Total trainable parameters: {sum(p.numel() for p in params):,}")
+        if non_leaf_params:
+            print(f"  (Excluded {len(non_leaf_params)} non-leaf parameters)")
         
         if self.config.training.optimizer.lower() == 'adam':
             return optim.Adam(
@@ -234,7 +285,7 @@ class Trainer:
             self.optimizer.zero_grad()
             
             # Forward pass with mixed precision
-            with torch.cuda.amp.autocast(enabled=self.config.training.use_mixed_precision):
+            with autocast(device_type=self.device.type, enabled=self.config.training.use_mixed_precision):
                 # Get image features
                 image_features = self.model.image_encoder(image)
                 
@@ -244,8 +295,9 @@ class Trainer:
                     'point_labels': batch['prompts']['point_labels'].to(self.device)
                 }
                 
-                # Get predictions
+                # Get predictions (upsampled to ground-truth resolution)
                 pred_masks = self.model.sam_model(image_features, prompts)
+                pred_masks = self.model.resize_predictions(pred_masks, mask.shape[-2:])
                 
                 # Calculate loss
                 losses = self.criterion(pred_masks.squeeze(1), mask)
@@ -310,8 +362,9 @@ class Trainer:
                     'point_labels': batch['prompts']['point_labels'].to(self.device)
                 }
                 
-                # Get predictions
+                # Get predictions and resize to ground-truth resolution
                 pred_masks = self.model.sam_model(image_features, prompts)
+                pred_masks = self.model.resize_predictions(pred_masks, mask.shape[-2:])
                 pred_masks_sigmoid = torch.sigmoid(pred_masks.squeeze(1))
                 
                 # Calculate metrics

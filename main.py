@@ -11,8 +11,10 @@ import json
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-sys.path.append(str(Path(__file__).parent / "src"))
+# Ensure root directory is in path for imports
+root_dir = Path(__file__).parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 from configs.config import Config
 from src.training.trainer import Trainer
@@ -63,7 +65,8 @@ Examples:
     parser.add_argument(
         '--model_path',
         type=str,
-        help='Path to pretrained model checkpoint'
+        required=True,
+        help='Path to SAM model checkpoint (required). Download from: https://dl.fbaipublicfiles.com/segment_anything/'
     )
     parser.add_argument(
         '--resume',

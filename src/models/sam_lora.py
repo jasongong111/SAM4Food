@@ -16,7 +16,6 @@ from pathlib import Path
 # Import SAM components
 try:
     from segment_anything import sam_model_registry
-    from segment_anything.modeling import PromptedSAM
     from segment_anything.predictor import SamPredictor
 except ImportError:
     print("Installing SAM...")
@@ -24,7 +23,6 @@ except ImportError:
     subprocess.run(["pip", "install", "git+https://github.com/facebookresearch/segment-anything.git"], 
                    check=True)
     from segment_anything import sam_model_registry
-    from segment_anything.modeling import PromptedSAM
     from segment_anything.predictor import SamPredictor
 
 # Import LoRA components
@@ -36,7 +34,8 @@ except ImportError:
     subprocess.run(["pip", "install", "peft"], check=True)
     from peft import LoraConfig, get_peft_model
 
-from ..configs.config import Config
+from pathlib import Path
+from configs.config import Config
 
 
 class SAMLoRAModel(nn.Module):
@@ -66,47 +65,132 @@ class SAMLoRAModel(nn.Module):
         """Load the base SAM model"""
         model_type = self.config.model.sam_model_name
         
-        # Load SAM model checkpoint
+        # Load SAM model checkpoint - must be provided manually
         sam_checkpoint = self.config.model.sam_checkpoint_path
         if sam_checkpoint is None:
-            # Use the default SAM model from the registry
-            if model_type == "vit_b":
-                sam_checkpoint = "sam_vit_b_01ec64.pth"
-            elif model_type == "vit_l":
-                sam_checkpoint = "sam_vit_l_0b3195.pth"
-            elif model_type == "vit_h":
-                sam_checkpoint = "sam_vit_h_4b8939.pth"
-            else:
-                raise ValueError(f"Unsupported SAM model type: {model_type}")
+            raise ValueError(
+                f"SAM checkpoint path is required. Please download the SAM {model_type} checkpoint manually:\n"
+                f"  - ViT-B: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth\n"
+                f"  - ViT-L: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth\n"
+                f"  - ViT-H: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth\n"
+                f"\nThen specify the path using --model_path argument or set config.model.sam_checkpoint_path"
+            )
+        
+        # Check if checkpoint file exists
+        checkpoint_path = Path(sam_checkpoint)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"SAM checkpoint file not found at: {sam_checkpoint}\n"
+                f"Please download the SAM {model_type} checkpoint from:\n"
+                f"  https://dl.fbaipublicfiles.com/segment_anything/"
+            )
         
         # Register and load the model
-        sam_model = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        sam_model = sam_model_registry[model_type](checkpoint=str(checkpoint_path))
         
         # Store components for later use
         self.image_encoder = sam_model.image_encoder
         self.mask_decoder = sam_model.mask_decoder
         self.prompt_encoder = sam_model.prompt_encoder
         
+        # Store original SAM model for accessing helper methods
+        self._original_sam_model = sam_model
+        
         # Store original forward methods for potential reference
         self._original_forward = sam_model.forward
         
+    def _get_target_modules(self, model, model_name="model"):
+        """Get target module names for LoRA from the model"""
+        target_modules = []
+        all_module_names = []
+        
+        # Find all linear layers in the model - use full module paths
+        for name, module in model.named_modules():
+            all_module_names.append(name)
+            if isinstance(module, nn.Linear):
+                # Use full module path for PEFT
+                target_modules.append(name)
+        
+        if target_modules:
+            print(f"Found {len(target_modules)} linear layers in {model_name}")
+            # Show first few for debugging
+            if len(target_modules) > 0:
+                print(f"  Example modules: {target_modules[:5]}")
+        else:
+            # No Linear layers found - print available modules for debugging
+            print(f"⚠️  No Linear layers found in {model_name}")
+            print(f"  Total modules: {len(all_module_names)}")
+            print(f"  Sample module names: {all_module_names[:10]}")
+            # Try to find other trainable layers
+            for name, module in model.named_modules():
+                if isinstance(module, (nn.Conv2d, nn.Conv1d)):
+                    target_modules.append(name)
+                    print(f"  Found Conv layer: {name}")
+            # If still nothing, return empty list (will skip LoRA)
+            if not target_modules:
+                print(f"  ⚠️  No suitable layers found for LoRA in {model_name}")
+        
+        return target_modules
+    
     def _setup_lora_adapters(self):
         """Set up LoRA adapters for the target modules"""
         
-        # Create LoRA configuration
-        lora_config = LoraConfig(
-            r=self.config.model.lora_rank,
-            lora_alpha=self.config.model.lora_alpha,
-            target_modules=self.config.model.target_modules,
-            lora_dropout=self.config.model.lora_dropout,
-            bias="none",  # No bias modifications
-        )
+        # Helper function to create LoRA config
+        def create_lora_config(target_modules):
+            return LoraConfig(
+                r=self.config.model.lora_rank,
+                lora_alpha=self.config.model.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=self.config.model.lora_dropout,
+                bias="none",  # No bias modifications
+            )
         
-        # Apply LoRA to mask decoder
-        self.mask_decoder = get_peft_model(self.mask_decoder, lora_config)
+        # Apply LoRA to mask decoder (required for fine-tuning)
+        if self.config.model.target_modules:
+            # Use configured target modules
+            mask_decoder_modules = self.config.model.target_modules
+        else:
+            # Auto-detect target modules from mask decoder
+            mask_decoder_modules = self._get_target_modules(self.mask_decoder, "mask_decoder")
         
-        # Apply LoRA to prompt encoder
-        self.prompt_encoder = get_peft_model(self.prompt_encoder, lora_config)
+        if not mask_decoder_modules:
+            raise ValueError(
+                "No suitable layers found in mask_decoder for LoRA. "
+                "Mask decoder must have Linear layers for LoRA fine-tuning. "
+                "Please check your SAM model installation."
+            )
+        
+        try:
+            lora_config_md = create_lora_config(mask_decoder_modules)
+            self.mask_decoder = get_peft_model(self.mask_decoder, lora_config_md)
+            print("✅ LoRA adapters applied to mask_decoder")
+        except ValueError as e:
+            print(f"⚠️  Error applying LoRA to mask_decoder: {e}")
+            print("  This is a critical error - mask decoder LoRA is required for training.")
+            raise
+        
+        # Apply LoRA to prompt encoder (only if it has suitable layers)
+        if self.config.model.target_modules:
+            # Use configured target modules
+            prompt_encoder_modules = self.config.model.target_modules
+        else:
+            # Auto-detect target modules from prompt encoder
+            prompt_encoder_modules = self._get_target_modules(self.prompt_encoder, "prompt_encoder")
+        
+        # Only apply LoRA if we found suitable modules
+        if prompt_encoder_modules:
+            try:
+                lora_config_pe = create_lora_config(prompt_encoder_modules)
+                self.prompt_encoder = get_peft_model(self.prompt_encoder, lora_config_pe)
+                print("✅ LoRA adapters applied to prompt_encoder")
+            except ValueError as e:
+                print(f"⚠️  Error applying LoRA to prompt_encoder: {e}")
+                print("  Skipping LoRA on prompt_encoder (keeping original)")
+                # Keep original prompt encoder if LoRA fails
+                pass
+        else:
+            print("ℹ️  Skipping LoRA on prompt_encoder (no suitable layers found)")
+            print("  Prompt encoder will remain frozen (original weights)")
         
         # Set the combined model for inference
         self._setup_combined_model()
@@ -126,25 +210,178 @@ class SAMLoRAModel(nn.Module):
                 Forward pass through the combined model
                 
                 Args:
-                    image_embeddings: Image features from the frozen encoder
+                    image_embeddings: Image features from the frozen encoder [B, C, H, W]
                     prompts: Prompt features (points, boxes, masks)
                 
                 Returns:
-                    Predicted masks
+                    Predicted masks [B, 1, H, W]
                 """
-                # Get prompt embeddings
-                sparse_embeddings, dense_embeddings = self.prompt_encoder(points=prompts['points'], 
-                                                                        boxes=prompts.get('boxes'),
-                                                                        masks=prompts.get('masks'))
-                
-                # Predict masks using the decoder
-                pred_masks = self.mask_decoder(image_embeddings, 
-                                             sparse_prompt_embeddings=sparse_embeddings,
-                                             dense_prompt_embeddings=dense_embeddings)
-                
-                return pred_masks
+                batch_size = image_embeddings.shape[0]
+                device = image_embeddings.device
+                dtype = image_embeddings.dtype
+
+                def _slice_tensor(value, idx):
+                    if value is None:
+                        return None
+                    if isinstance(value, torch.Tensor):
+                        if value.shape[0] == 1:
+                            return value
+                        return value[idx:idx+1]
+                    return value
+
+                def _prepare_points(idx):
+                    if 'points' not in prompts:
+                        return None
+                    points_value = prompts['points']
+                    labels_value = prompts.get('point_labels')
+
+                    if isinstance(points_value, tuple):
+                        # Support prompts where points are already provided as (coords, labels)
+                        points_value, tuple_labels = points_value
+                        labels_value = tuple_labels
+
+                    if labels_value is None:
+                        raise ValueError(
+                            "points must include corresponding labels via 'point_labels' or as part of the tuple"
+                        )
+
+                    point_coords = _slice_tensor(points_value, idx)
+                    point_labels = _slice_tensor(labels_value, idx)
+
+                    if point_coords is None or point_labels is None:
+                        return None
+
+                    # Keep only the first point per image to avoid mismatched batch sizes
+                    if point_coords.ndim >= 3 and point_coords.shape[1] > 1:
+                        point_coords = point_coords[:, 0:1, :]
+                        point_labels = point_labels[:, 0:1]
+
+                    return (point_coords, point_labels)
+
+                def _prepare_boxes(idx):
+                    boxes = prompts.get('boxes')
+                    return _slice_tensor(boxes, idx)
+
+                def _prepare_masks(idx):
+                    masks = prompts.get('masks')
+                    return _slice_tensor(masks, idx)
+
+                # Generate image positional encoding
+                image_pe = None
+                try:
+                    if hasattr(self.prompt_encoder, 'get_dense_pe'):
+                        image_pe = self.prompt_encoder.get_dense_pe()
+                        image_pe = image_pe.to(device=device, dtype=dtype)
+                    elif hasattr(self.mask_decoder, 'pe_layer'):
+                        image_pe = self.mask_decoder.pe_layer(image_embeddings)
+                    elif hasattr(self.mask_decoder, 'get_image_pe'):
+                        image_pe = self.mask_decoder.get_image_pe(image_embeddings)
+                    else:
+                        base_model = getattr(self.mask_decoder, 'get_base_model', lambda: self.mask_decoder)()
+                        if hasattr(base_model, 'pe_layer'):
+                            image_pe = base_model.pe_layer(image_embeddings)
+                except Exception:
+                    image_pe = None
+
+                if image_pe is None:
+                    h, w = image_embeddings.shape[-2:]
+                    pe_dim = 256
+                    image_pe = torch.zeros((batch_size, pe_dim, h, w), device=device, dtype=dtype)
+
+                masks_list = []
+
+                for idx in range(batch_size):
+                    points_tuple = _prepare_points(idx)
+                    boxes = _prepare_boxes(idx)
+                    masks = _prepare_masks(idx)
+
+                    sparse_embeddings, dense_embeddings = self.prompt_encoder(
+                        points=points_tuple,
+                        boxes=boxes,
+                        masks=masks
+                    )
+
+                    curr_image_embeddings = image_embeddings[idx:idx+1]
+                    curr_image_pe = image_pe if image_pe.shape[0] == 1 else image_pe[idx:idx+1]
+
+                    pred_masks = self.mask_decoder(
+                        image_embeddings=curr_image_embeddings,
+                        image_pe=curr_image_pe,
+                        sparse_prompt_embeddings=sparse_embeddings,
+                        dense_prompt_embeddings=dense_embeddings,
+                        multimask_output=False  # single mask output during training
+                    )
+
+                    if isinstance(pred_masks, tuple):
+                        masks_out = pred_masks[0]
+                    else:
+                        masks_out = pred_masks
+
+                    masks_list.append(masks_out)
+
+                # Concatenate masks from all samples
+                masks = torch.cat(masks_list, dim=0)
+
+                # Ensure we have the right shape: [B, 1, H, W]
+                if len(masks.shape) == 4:
+                    return masks
+                elif len(masks.shape) == 3:
+                    return masks.unsqueeze(1)
+                else:
+                    return masks
         
         self.sam_model = CombinedSAM(self.image_encoder, self.prompt_encoder, self.mask_decoder)
+    
+    def resize_predictions(
+        self,
+        pred_masks: torch.Tensor,
+        target_size: Optional[Union[Tuple[int, int], torch.Size, torch.Tensor]] = None
+    ) -> torch.Tensor:
+        """
+        Resize predicted masks to match a desired spatial resolution.
+        
+        Args:
+            pred_masks: Tensor of shape (B, C, H, W) or (B, H, W).
+            target_size: Desired (H, W). Defaults to configured input_size if None.
+        
+        Returns:
+            Tensor with the same batch/channel dims as input but spatially resized.
+        """
+        if pred_masks is None:
+            return pred_masks
+        
+        if target_size is None:
+            size = getattr(self.config.data, 'input_size', None)
+            if size is None:
+                return pred_masks
+            target_size = (size, size)
+        elif isinstance(target_size, torch.Size):
+            target_size = tuple(int(dim) for dim in target_size[-2:])
+        elif isinstance(target_size, torch.Tensor):
+            if target_size.numel() < 2:
+                raise ValueError("target_size tensor must contain at least two elements for (H, W)")
+            target_size = tuple(int(dim) for dim in target_size[-2:].tolist())
+        else:
+            target_size = tuple(int(dim) for dim in target_size)
+        
+        if pred_masks.dim() == 3:
+            pred_masks = pred_masks.unsqueeze(1)
+            squeeze_channel = True
+        else:
+            squeeze_channel = False
+        
+        if tuple(pred_masks.shape[-2:]) != tuple(target_size):
+            pred_masks = F.interpolate(
+                pred_masks,
+                size=target_size,
+                mode='bilinear',
+                align_corners=False
+            )
+        
+        if squeeze_channel:
+            pred_masks = pred_masks.squeeze(1)
+        
+        return pred_masks
         
     def _freeze_image_encoder(self):
         """Freeze the image encoder parameters"""
@@ -157,27 +394,25 @@ class SAMLoRAModel(nn.Module):
                 for param in module.parameters():
                     param.requires_grad = False
                     
-    def get_trainable_parameters(self) -> List[Dict]:
-        """Get all trainable parameters for optimization"""
+    def get_trainable_parameters(self):
+        """Get all trainable parameters for optimization
+        
+        Returns:
+            List of parameters (tensors) that require gradients
+        """
+        # For PEFT models, get parameters directly
+        # PEFT ensures LoRA adapter parameters are properly set up
         trainable_params = []
         
-        # Add LoRA parameters from mask decoder
-        if hasattr(self.mask_decoder, 'peft_config'):
-            for name, param in self.mask_decoder.named_parameters():
-                if param.requires_grad:
-                    trainable_params.append({
-                        'name': f'mask_decoder.{name}',
-                        'params': param
-                    })
+        # Get parameters from mask decoder (should be LoRA adapters)
+        for name, param in self.mask_decoder.named_parameters():
+            if param.requires_grad:
+                trainable_params.append(param)
         
-        # Add LoRA parameters from prompt encoder
-        if hasattr(self.prompt_encoder, 'peft_config'):
-            for name, param in self.prompt_encoder.named_parameters():
-                if param.requires_grad:
-                    trainable_params.append({
-                        'name': f'prompt_encoder.{name}',
-                        'params': param
-                    })
+        # Get parameters from prompt encoder (if LoRA was applied)
+        for name, param in self.prompt_encoder.named_parameters():
+            if param.requires_grad:
+                trainable_params.append(param)
         
         return trainable_params
     

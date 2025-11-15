@@ -5,13 +5,14 @@ Configuration file for SAM Food Segmentation Project
 import os
 from dataclasses import dataclass
 from typing import Optional
+import torch
 
 @dataclass
 class ModelConfig:
     """Configuration for SAM model with LoRA adaptation"""
     # SAM model settings
     sam_model_name: str = "vit_b"  # Options: vit_b, vit_l, vit_h
-    sam_checkpoint_path: Optional[str] = None  # Will be downloaded automatically
+    sam_checkpoint_path: Optional[str] = None  # Must be provided manually - download from https://dl.fbaipublicfiles.com/segment_anything/
     
     # LoRA settings
     lora_rank: int = 8  # Rank for LoRA adapters
@@ -21,13 +22,9 @@ class ModelConfig:
     
     def __post_init__(self):
         if self.target_modules is None:
-            # Target the mask decoder and prompt encoder components
-            self.target_modules = [
-                "mask_decoder.transformer.layers",
-                "prompt_encoder.mask_tokens",
-                "prompt_encoder.output_tokens",
-                "mask_decoder.output_upscaling"
-            ]
+            # Use None to enable auto-detection, or use regex patterns
+            # Common patterns for SAM linear layers (will be auto-detected if None)
+            self.target_modules = None  # Auto-detect from model structure
 
 @dataclass
 class TrainingConfig:
@@ -65,6 +62,9 @@ class DataConfig:
     train_size: int = 4983
     val_size: int = 2135
     test_size: int = 0  # Not specified in the proposal
+    
+    # Dataset subset for training (use only a fraction of training data)
+    train_subset_fraction: float = 0.1  # Use 20% of training dataset
     
     # Data preprocessing
     image_size: int = 1024  # SAM's default image size

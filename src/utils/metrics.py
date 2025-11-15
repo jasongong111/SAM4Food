@@ -272,6 +272,7 @@ def evaluate_model(model, dataloader, config, device) -> Dict[str, float]:
             }
             
             pred_masks = model.sam_model(image_features, prompts)
+            pred_masks = model.resize_predictions(pred_masks, mask.shape[-2:])
             
             # Evaluate batch
             batch_metrics = evaluate_batch(pred_masks, mask, config)

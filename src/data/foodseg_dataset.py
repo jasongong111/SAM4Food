@@ -16,8 +16,9 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import random
 
-from ..configs.config import Config
+from configs.config import Config
 
 
 class FoodSeg103Dataset(Dataset):
@@ -58,14 +59,21 @@ class FoodSeg103Dataset(Dataset):
         return dataset_path
     
     def _load_annotations(self) -> List[Dict]:
-        """Load annotations from the dataset"""
+        """Load annotations from the dataset using ImageSets/*.txt files"""
         annotations = []
         
-        # For FoodSeg103, annotations are typically in JSON format
-        annotation_file = self.dataset_path / "annotations.json"
+        # Map split names to ImageSets file names
+        # Use 'test' split for validation if 'val' is requested
+        split_map = {
+            'train': 'train',
+            'val': 'test',  # Use test split for validation
+            'test': 'test'
+        }
         
-        if not annotation_file.exists():
-            print(f"Annotations not found at {annotation_file}")
+        imageset_file = self.dataset_path / "ImageSets" / f"{split_map.get(self.split, self.split)}.txt"
+        
+        if not imageset_file.exists():
+            print(f"ImageSet file not found at {imageset_file}")
             print("Please download the FoodSeg103 dataset manually.")
             print("Dataset can be found at: https://github.com/L1016517444/FoodSeg103")
             
@@ -74,20 +82,61 @@ class FoodSeg103Dataset(Dataset):
                 print("Creating mock annotations for debugging...")
                 return self._create_mock_annotations()
             else:
-                raise FileNotFoundError(f"Dataset annotations not found at {annotation_file}")
+                raise FileNotFoundError(f"ImageSet file not found at {imageset_file}")
         
-        with open(annotation_file, 'r') as f:
-            data = json.load(f)
+        # Read image IDs from the ImageSets file
+        with open(imageset_file, 'r') as f:
+            image_ids = [line.strip() for line in f.readlines() if line.strip()]
         
-        # Process annotations based on the split
-        for item in data:
-            if item.get('split') == self.split or (self.split == 'all' and item.get('split') in ['train', 'val']):
+        # Determine the split directory name (train or test)
+        split_dir = split_map.get(self.split, self.split)
+        
+        # Build paths for images and masks
+        img_dir = self.dataset_path / "Images" / "img_dir" / split_dir
+        ann_dir = self.dataset_path / "Images" / "ann_dir" / split_dir
+        
+        # Process each image ID
+        for image_id in image_ids:
+            # Remove file extension if present
+            image_id_base = image_id.replace('.jpg', '').replace('.png', '')
+            
+            # Construct paths
+            image_path = img_dir / f"{image_id_base}.jpg"
+            mask_path = ann_dir / f"{image_id_base}.png"
+            
+            # Only add if both files exist (or in debug mode)
+            if image_path.exists() and mask_path.exists():
                 annotations.append({
-                    'image_path': self.dataset_path / 'images' / item['image'],
-                    'mask_path': self.dataset_path / 'masks' / item['mask'],
-                    'ingredients': item.get('ingredients', []),
-                    'labels': item.get('labels', [])
+                    'image_path': image_path,
+                    'mask_path': mask_path,
+                    'image_id': image_id_base,
+                    'ingredients': [],  # Not available in this structure
+                    'labels': []  # Not available in this structure
                 })
+            elif self.config.system.debug:
+                # In debug mode, add even if files don't exist
+                annotations.append({
+                    'image_path': image_path,
+                    'mask_path': mask_path,
+                    'image_id': image_id_base,
+                    'ingredients': [],
+                    'labels': []
+                })
+        
+        if len(annotations) == 0 and not self.config.system.debug:
+            raise FileNotFoundError(
+                f"No valid image-mask pairs found for split '{self.split}'. "
+                f"Checked {len(image_ids)} image IDs in {imageset_file}"
+            )
+        
+        # Create subset for training and validation splits if specified
+        if self.split in ['train', 'val'] and self.config.data.train_subset_fraction < 1.0:
+            subset_size = int(len(annotations) * self.config.data.train_subset_fraction)
+            # Use local random generator with seed for reproducibility
+            rng = random.Random(self.config.system.seed)
+            annotations = rng.sample(annotations, subset_size)
+            split_name = 'training' if self.split == 'train' else 'validation'
+            print(f"Created {split_name} subset: {len(annotations)} samples ({self.config.data.train_subset_fraction*100:.1f}% of full dataset)")
         
         return annotations
     
@@ -96,12 +145,17 @@ class FoodSeg103Dataset(Dataset):
         mock_annotations = []
         
         # Create simple examples with placeholder data
+        split_dir = 'train' if self.split == 'train' else 'test'
+        img_dir = self.dataset_path / "Images" / "img_dir" / split_dir
+        ann_dir = self.dataset_path / "Images" / "ann_dir" / split_dir
+        
         for i in range(min(10, self.config.data.train_size if self.split == 'train' else self.config.data.val_size)):
             mock_annotations.append({
-                'image_path': self.dataset_path / f'images' / f'sample_{i}.jpg',
-                'mask_path': self.dataset_path / f'masks' / f'sample_{i}.png',
-                'ingredients': [f'ingredient_{j}' for j in range(np.random.randint(1, 5))],
-                'labels': list(range(np.random.randint(1, 5)))
+                'image_path': img_dir / f'sample_{i:08d}.jpg',
+                'mask_path': ann_dir / f'sample_{i:08d}.png',
+                'image_id': f'sample_{i:08d}',
+                'ingredients': [],
+                'labels': []
             })
         
         return mock_annotations
@@ -110,6 +164,15 @@ class FoodSeg103Dataset(Dataset):
         """Setup data augmentation transforms"""
         if self.split == 'train' and self.config.data.use_augmentation:
             transforms = A.Compose([
+                # First, resize to ensure consistent size (required for batching)
+                A.LongestMaxSize(max_size=self.config.data.input_size, p=1.0),
+                A.PadIfNeeded(min_height=self.config.data.input_size, 
+                             min_width=self.config.data.input_size,
+                             border_mode=cv2.BORDER_CONSTANT,
+                             value=0,
+                             mask_value=0,
+                             p=1.0),
+                
                 # Geometric transformations
                 A.RandomRotate90(p=0.5),
                 A.HorizontalFlip(p=self.config.data.horizontal_flip),
@@ -129,11 +192,15 @@ class FoodSeg103Dataset(Dataset):
                     A.MotionBlur(blur_limit=3, p=1.0)
                 ], p=0.3),
                 
-                # Random resize and crop
-                A.RandomResizedCrop(height=self.config.data.input_size,
-                                  width=self.config.data.input_size,
-                                  scale=(0.8, 1.0),
-                                  p=0.5),
+                # Random crop (now safe since we've already resized)
+                A.RandomCrop(height=self.config.data.input_size,
+                           width=self.config.data.input_size,
+                           p=0.5),
+                
+                # Final resize to ensure exact size (in case crop didn't apply)
+                A.Resize(height=self.config.data.input_size, 
+                        width=self.config.data.input_size,
+                        p=1.0),
                 
                 # Normalization
                 A.Normalize(mean=self.config.data.mean, std=self.config.data.std),

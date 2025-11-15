@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.pth
 
 # Virtual environments (venv - deprecated, now using conda)
 venv/
@@ -58,3 +59,5 @@ Thumbs.db
 
 # Data
 data/
+wandb/
+checkpoints/

@@ -47,13 +47,17 @@ else
     echo "✅ Conda environment 'sam4food' is ready!"
 fi
 
-# Download SAM checkpoint if needed
-echo "Checking SAM checkpoints..."
-if [ ! -f "models/sam_vit_b_01ec64.pth" ]; then
-    echo "Downloading SAM ViT-B checkpoint..."
-    wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -P models/ || \
-    curl -L https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -o models/sam_vit_b_01ec64.pth
-fi
+# SAM checkpoint download instructions
+echo ""
+echo "📥 SAM Model Checkpoints:"
+echo "   Please download SAM checkpoints manually from:"
+echo "   - ViT-B: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+echo "   - ViT-L: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
+echo "   - ViT-H: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+echo ""
+echo "   After downloading, specify the path using --model_path argument"
+echo "   Example: python main.py --mode train --model_path /path/to/sam_vit_b_01ec64.pth"
+echo ""
 
 # Create necessary directories
 echo "Creating output directories..."
