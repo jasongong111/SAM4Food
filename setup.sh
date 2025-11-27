@@ -47,16 +47,18 @@ else
     echo "✅ Conda environment 'sam4food' is ready!"
 fi
 
-# SAM checkpoint download instructions
+# SAM checkpoint download
 echo ""
-echo "📥 SAM Model Checkpoints:"
-echo "   Please download SAM checkpoints manually from:"
-echo "   - ViT-B: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
-echo "   - ViT-L: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
-echo "   - ViT-H: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+echo "📥 Downloading SAM ViT-B Model Checkpoint..."
+if [ ! -f "sam_vit_b_01ec64.pth" ]; then
+    curl -O https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+    echo "✅ Download complete: sam_vit_b_01ec64.pth"
+else
+    echo "✅ Checkpoint already exists: sam_vit_b_01ec64.pth"
+fi
 echo ""
-echo "   After downloading, specify the path using --model_path argument"
-echo "   Example: python main.py --mode train --model_path /path/to/sam_vit_b_01ec64.pth"
+echo "   Using default path: ./sam_vit_b_01ec64.pth"
+echo "   Example: python main.py --mode train --model_path sam_vit_b_01ec64.pth"
 echo ""
 
 # Create necessary directories
@@ -67,6 +69,17 @@ mkdir -p logs
 mkdir -p results
 mkdir -p visualizations
 mkdir -p data
+
+# Download LoRA checkpoint
+echo ""
+echo "📥 Downloading LoRA Best Model Checkpoint..."
+if [ ! -f "checkpoints/best_model.pth" ]; then
+    curl -L -o checkpoints/best_model.pth "https://huggingface.co/JasonGong111/SAM4Food/resolve/main/best_model.pth?download=true"
+    echo "✅ Download complete: checkpoints/best_model.pth"
+else
+    echo "✅ Checkpoint already exists: checkpoints/best_model.pth"
+fi
+echo ""
 
 # Set up environment variables
 echo "Setting up environment..."
