@@ -12,10 +12,6 @@ Fine-tuning the Segment Anything Model (SAM) with LoRA adapters for food image s
 4. [Quick Start](#quick-start)
 5. [Training](#training)
 6. [Inference](#inference)
-7. [Reproducing Results](#reproducing-results)
-8. [Project Structure](#project-structure)
-9. [Configuration](#configuration)
-10. [Troubleshooting](#troubleshooting)
 
 ---
 
