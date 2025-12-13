@@ -64,7 +64,7 @@ class DataConfig:
     test_size: int = 0  # Not specified in the proposal
     
     # Dataset subset for training (use only a fraction of training data)
-    train_subset_fraction: float = 0.1  # Use 20% of training dataset
+    train_subset_fraction: float = 0.1  # Use 10% of training dataset
     
     # Data preprocessing
     image_size: int = 1024  # SAM's default image size
