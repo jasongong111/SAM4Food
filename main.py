@@ -23,6 +23,20 @@ from src.utils.metrics import evaluate_model, compare_with_baselines
 from src.data.foodseg_dataset import download_foodseg103_dataset
 
 
+def _resolve_latest_trained_checkpoint(config: Config) -> str | None:
+    """Find the most relevant trained checkpoint for evaluation flows."""
+    checkpoint_dir = Path(config.system.model_save_dir)
+    best_checkpoint = checkpoint_dir / "best_model.pth"
+    if best_checkpoint.exists():
+        return str(best_checkpoint)
+
+    epoch_checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pth"))
+    if epoch_checkpoints:
+        return str(epoch_checkpoints[-1])
+
+    return None
+
+
 def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
@@ -31,19 +45,19 @@ def parse_arguments():
         epilog="""
 Examples:
   # Train from scratch
-  python main.py --mode train --model_name vit_b --epochs 50
+  python main.py --mode train --model_name vit_b --sam_checkpoint sam_vit_b.pth --epochs 50
 
   # Continue training from checkpoint
-  python main.py --mode train --resume checkpoints/best_model.pth
+  python main.py --mode train --sam_checkpoint sam_vit_b.pth --resume checkpoints/best_model.pth
 
   # Evaluate trained model
-  python main.py --mode eval --model_path checkpoints/best_model.pth
+  python main.py --mode eval --sam_checkpoint sam_vit_b.pth --trained_checkpoint checkpoints/best_model.pth
 
   # Generate visualizations
-  python main.py --mode visualize --model_path checkpoints/best_model.pth
+  python main.py --mode visualize --sam_checkpoint sam_vit_b.pth --trained_checkpoint checkpoints/best_model.pth
 
   # Complete pipeline (train + eval + visualize)
-  python main.py --mode full --model_name vit_b --epochs 50
+  python main.py --mode full --model_name vit_b --sam_checkpoint sam_vit_b.pth --epochs 50
         """
     )
     
@@ -63,10 +77,19 @@ Examples:
         help='SAM model architecture'
     )
     parser.add_argument(
+        '--sam_checkpoint',
+        type=str,
+        help='Path to the base SAM checkpoint. Download from: https://dl.fbaipublicfiles.com/segment_anything/'
+    )
+    parser.add_argument(
         '--model_path',
         type=str,
-        required=True,
-        help='Path to SAM model checkpoint (required). Download from: https://dl.fbaipublicfiles.com/segment_anything/'
+        help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        '--trained_checkpoint',
+        type=str,
+        help='Path to a trained task checkpoint for evaluation or visualization'
     )
     parser.add_argument(
         '--resume',
@@ -99,12 +122,48 @@ Examples:
         default=8,
         help='LoRA rank for parameter efficient fine-tuning'
     )
+    parser.add_argument(
+        '--use_ingredient_head',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='Enable ingredient classification head'
+    )
+    parser.add_argument(
+        '--num_ingredient_classes',
+        type=int,
+        default=None,
+        help='Number of ingredient classes for ingredient mode'
+    )
+    parser.add_argument(
+        '--ingredient_head_hidden_dim',
+        type=int,
+        default=None,
+        help='Hidden dimension for the ingredient classification head'
+    )
+    parser.add_argument(
+        '--classification_loss_weight',
+        type=float,
+        default=None,
+        help='Loss weight for ingredient classification'
+    )
+    parser.add_argument(
+        '--mask_loss_weight',
+        type=float,
+        default=None,
+        help='Loss weight for prompted mask supervision'
+    )
     
     # Data configuration
     parser.add_argument(
+        '--dataset_name',
+        type=str,
+        default=None,
+        help='Dataset identifier to use (e.g. FoodSeg103 or FoodInsSeg)'
+    )
+    parser.add_argument(
         '--dataset_path',
         type=str,
-        help='Path to FoodSeg103 dataset'
+        help='Path to dataset root'
     )
     parser.add_argument(
         '--image_size',
@@ -145,13 +204,53 @@ Examples:
         help='Output directory for results'
     )
     parser.add_argument(
+        '--use_prompted_aggregation',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='Enable prompted aggregation for ingredient-mode inference'
+    )
+    parser.add_argument(
+        '--aggregation_score_threshold',
+        type=float,
+        default=None,
+        help='Minimum score threshold for aggregation candidates'
+    )
+    parser.add_argument(
+        '--aggregation_iou_threshold',
+        type=float,
+        default=None,
+        help='IoU threshold used to merge prompted predictions'
+    )
+    parser.add_argument(
+        '--max_prompts_per_image',
+        type=int,
+        default=None,
+        help='Maximum prompted regions to aggregate per image'
+    )
+    parser.add_argument(
         '--visualization_samples',
         type=int,
         default=20,
         help='Number of samples to visualize'
     )
-    
-    return parser.parse_args()
+
+    args = parser.parse_args()
+    if args.sam_checkpoint is None and args.model_path is not None:
+        args.sam_checkpoint = args.model_path
+
+    if (
+        args.trained_checkpoint is None
+        and args.model_path is not None
+        and args.mode in {'eval', 'visualize'}
+    ):
+        args.trained_checkpoint = args.model_path
+
+    if not args.sam_checkpoint:
+        parser.error('--sam_checkpoint is required (or use legacy --model_path)')
+    if args.mode in {'eval', 'visualize'} and not args.trained_checkpoint:
+        parser.error('--trained_checkpoint is required for eval and visualize modes')
+
+    return args
 
 
 def setup_config(args) -> Config:
@@ -160,16 +259,30 @@ def setup_config(args) -> Config:
     
     # Update model configuration
     config.model.sam_model_name = args.model_name
-    if args.model_path:
-        config.model.sam_checkpoint_path = args.model_path
+    if args.sam_checkpoint:
+        config.model.sam_checkpoint_path = args.sam_checkpoint
+    if args.trained_checkpoint:
+        config.model.trained_checkpoint_path = args.trained_checkpoint
     config.model.lora_rank = args.lora_rank
+    if args.use_ingredient_head is not None:
+        config.model.use_ingredient_head = args.use_ingredient_head
+    if args.num_ingredient_classes is not None:
+        config.model.num_ingredient_classes = args.num_ingredient_classes
+    if args.ingredient_head_hidden_dim is not None:
+        config.model.ingredient_head_hidden_dim = args.ingredient_head_hidden_dim
     
     # Update training configuration
     config.training.num_epochs = args.epochs
     config.training.batch_size = args.batch_size
     config.training.learning_rate = args.learning_rate
+    if args.classification_loss_weight is not None:
+        config.training.classification_loss_weight = args.classification_loss_weight
+    if args.mask_loss_weight is not None:
+        config.training.mask_loss_weight = args.mask_loss_weight
     
     # Update data configuration
+    if args.dataset_name:
+        config.data.dataset_name = args.dataset_name
     config.data.dataset_path = args.dataset_path
     config.data.input_size = args.image_size
     
@@ -186,6 +299,16 @@ def setup_config(args) -> Config:
     
     # Update evaluation configuration
     config.evaluation.num_visualizations = args.visualization_samples
+
+    # Update inference configuration
+    if args.use_prompted_aggregation is not None:
+        config.inference.use_prompted_aggregation = args.use_prompted_aggregation
+    if args.aggregation_score_threshold is not None:
+        config.inference.aggregation_score_threshold = args.aggregation_score_threshold
+    if args.aggregation_iou_threshold is not None:
+        config.inference.aggregation_iou_threshold = args.aggregation_iou_threshold
+    if args.max_prompts_per_image is not None:
+        config.inference.max_prompts_per_image = args.max_prompts_per_image
     
     return config
 
@@ -221,8 +344,13 @@ def setup_wandb(config, args):
 def download_dataset_if_needed(config, args):
     """Download dataset if not available"""
     if config.data.dataset_path is None:
-        dataset_path = download_foodseg103_dataset()
-        config.data.dataset_path = str(dataset_path)
+        if config.data.dataset_name == "FoodSeg103":
+            dataset_path = download_foodseg103_dataset()
+            config.data.dataset_path = str(dataset_path)
+        else:
+            raise ValueError(
+                f"Dataset path must be provided for dataset '{config.data.dataset_name}'"
+            )
 
 
 def train_model(config, args):
@@ -261,9 +389,9 @@ def evaluate_model_script(config, args):
     from src.models.sam_lora import SAMLoRAModel
     model = SAMLoRAModel(config).to(config.system.device)
     
-    if args.model_path:
-        print(f"Loading model from: {args.model_path}")
-        checkpoint = torch.load(args.model_path, map_location=config.system.device)
+    if args.trained_checkpoint:
+        print(f"Loading trained model from: {args.trained_checkpoint}")
+        checkpoint = torch.load(args.trained_checkpoint, map_location=config.system.device)
         model.load_state_dict(checkpoint['model_state_dict'])
     
     # Load data
@@ -295,9 +423,9 @@ def visualize_results(config, args):
     from src.models.sam_lora import SAMLoRAModel
     model = SAMLoRAModel(config).to(config.system.device)
     
-    if args.model_path:
-        print(f"Loading model from: {args.model_path}")
-        checkpoint = torch.load(args.model_path, map_location=config.system.device)
+    if args.trained_checkpoint:
+        print(f"Loading trained model from: {args.trained_checkpoint}")
+        checkpoint = torch.load(args.trained_checkpoint, map_location=config.system.device)
         model.load_state_dict(checkpoint['model_state_dict'])
     
     # Load data
@@ -324,6 +452,13 @@ def full_pipeline(config, args):
     
     # Train model
     trainer, history = train_model(config, args)
+
+    trained_checkpoint = args.trained_checkpoint or _resolve_latest_trained_checkpoint(config)
+    if trained_checkpoint is None:
+        raise ValueError("Full mode requires a trained checkpoint after training, but none was found")
+
+    args.trained_checkpoint = trained_checkpoint
+    config.model.trained_checkpoint_path = trained_checkpoint
     
     # Evaluate model
     results = evaluate_model_script(config, args)

@@ -13,6 +13,10 @@ class ModelConfig:
     # SAM model settings
     sam_model_name: str = "vit_b"  # Options: vit_b, vit_l, vit_h
     sam_checkpoint_path: Optional[str] = None  # Must be provided manually - download from https://dl.fbaipublicfiles.com/segment_anything/
+    trained_checkpoint_path: Optional[str] = None
+    use_ingredient_head: bool = False
+    num_ingredient_classes: int = 103
+    ingredient_head_hidden_dim: int = 256
     
     # LoRA settings
     lora_rank: int = 8  # Rank for LoRA adapters
@@ -41,6 +45,8 @@ class TrainingConfig:
     
     # Loss function settings
     dice_weight: float = 0.5  # Weight for Dice loss (BCE weight will be 1-dice_weight)
+    classification_loss_weight: float = 1.0
+    mask_loss_weight: float = 1.0
     
     # Checkpoint and logging
     save_frequency: int = 5  # Save checkpoint every N epochs
@@ -127,6 +133,15 @@ class EvaluationConfig:
     iou_threshold_range: tuple = (0.5, 0.95)  # mIoU from 0.5 to 0.95
     iou_threshold_step: float = 0.05
 
+
+@dataclass
+class InferenceConfig:
+    """Configuration for inference and aggregation"""
+    use_prompted_aggregation: bool = True
+    aggregation_score_threshold: float = 0.5
+    aggregation_iou_threshold: float = 0.5
+    max_prompts_per_image: int = 64
+
 class Config:
     """Main configuration class that combines all configs"""
     def __init__(self):
@@ -135,6 +150,7 @@ class Config:
         self.data = DataConfig()
         self.system = SystemConfig()
         self.evaluation = EvaluationConfig()
+        self.inference = InferenceConfig()
         
         # Create output directories
         os.makedirs(self.system.output_dir, exist_ok=True)
