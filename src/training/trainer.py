@@ -23,7 +23,14 @@ import json
 from ..models.sam_lora import SAMLoRAModel
 from ..data.foodseg_dataset import create_data_loaders
 from configs.config import Config
-from ..utils.metrics import calculate_miou, calculate_dice
+from ..utils.metrics import (
+    calculate_miou,
+    calculate_dice,
+    calculate_classification_accuracy,
+    calculate_instance_iou,
+    calculate_instance_dice,
+)
+from .losses import JointIngredientLoss
 
 
 class DiceLoss(nn.Module):
@@ -111,6 +118,14 @@ class Trainer:
     """
     
     def __init__(self, config: Config):
+        ingredient_mode = config.model.use_ingredient_head
+        foodinsseg_mode = config.data.dataset_name == "FoodInsSeg"
+        if ingredient_mode != foodinsseg_mode:
+            raise ValueError(
+                "use_ingredient_head and dataset_name='FoodInsSeg' must be enabled together. "
+                f"Got use_ingredient_head={ingredient_mode}, dataset_name={config.data.dataset_name!r}."
+            )
+
         self.config = config
         self.device = torch.device(config.system.device)
         
@@ -118,7 +133,13 @@ class Trainer:
         self.model = SAMLoRAModel(config).to(self.device)
         
         # Initialize loss function
-        self.criterion = CombinedLoss(dice_weight=config.training.dice_weight)
+        if config.model.use_ingredient_head:
+            self.criterion = JointIngredientLoss(
+                mask_weight=config.training.mask_loss_weight,
+                class_weight=config.training.classification_loss_weight,
+            )
+        else:
+            self.criterion = CombinedLoss(dice_weight=config.training.dice_weight)
         
         # Initialize optimizer
         self.optimizer = self._setup_optimizer()
@@ -133,8 +154,27 @@ class Trainer:
             self.scaler = GradScaler('cpu', enabled=False)
         
         # Initialize data loaders
-        self.train_loader, self.val_loader = create_data_loaders(config)
-        
+        if config.data.dataset_name == "FoodInsSeg":
+            from ..data.foodinsseg_dataset import FoodInsSegDataset
+            train_dataset = FoodInsSegDataset(config, split="train")
+            val_dataset = FoodInsSegDataset(config, split="val")
+            self.train_loader = DataLoader(
+                train_dataset,
+                batch_size=config.training.batch_size,
+                shuffle=True,
+                num_workers=config.system.num_workers,
+                pin_memory=True,
+            )
+            self.val_loader = DataLoader(
+                val_dataset,
+                batch_size=config.training.batch_size,
+                shuffle=False,
+                num_workers=config.system.num_workers,
+                pin_memory=True,
+            )
+        else:
+            self.train_loader, self.val_loader = create_data_loaders(config)
+
         # Training state
         self.current_epoch = 0
         self.best_miou = 0.0
@@ -268,6 +308,8 @@ class Trainer:
     
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch"""
+        if self.config.model.use_ingredient_head:
+            return self._train_epoch_ingredient()
         self.model.train()
         epoch_loss = 0.0
         epoch_dice_loss = 0.0
@@ -342,6 +384,8 @@ class Trainer:
     
     def validate_epoch(self) -> Dict[str, float]:
         """Validate for one epoch"""
+        if self.config.model.use_ingredient_head:
+            return self._validate_epoch_ingredient()
         self.model.eval()
         total_miou = 0.0
         total_dice = 0.0
@@ -384,16 +428,156 @@ class Trainer:
             'val_dice': avg_dice
         }
     
+    def _train_epoch_ingredient(self) -> Dict[str, float]:
+        """Train for one epoch using joint instance mask + ingredient classification loss."""
+        self.model.train()
+        epoch_loss = 0.0
+        epoch_mask_loss = 0.0
+        epoch_cls_loss = 0.0
+        epoch_iou = 0.0
+        epoch_dice = 0.0
+        epoch_acc = 0.0
+        num_batches = len(self.train_loader)
+
+        progress_bar = tqdm.tqdm(
+            self.train_loader,
+            desc=f"Training Epoch {self.current_epoch} [ingredient]",
+        )
+
+        for batch_idx, batch in enumerate(progress_bar):
+            image = batch['image'].to(self.device)
+            instance_mask = batch['instance_mask'].to(self.device)
+            class_id = batch['class_id'].to(self.device)
+
+            self.optimizer.zero_grad()
+
+            with autocast(
+                device_type=self.device.type,
+                enabled=self.config.training.use_mixed_precision,
+            ):
+                prompts = {
+                    'points': batch['prompts']['points'].to(self.device),
+                    'point_labels': batch['prompts']['point_labels'].to(self.device),
+                }
+                outputs = self.model.forward_instance(image, prompts)
+                mask_logits = self.model.resize_predictions(
+                    outputs["mask_logits"], instance_mask.shape[-2:]
+                )
+                losses = self.criterion(
+                    mask_logits, instance_mask, outputs["class_logits"], class_id
+                )
+
+            self.scaler.scale(losses['total_loss']).backward()
+
+            if (batch_idx + 1) % self.config.training.gradient_accumulation_steps == 0:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
+
+            with torch.no_grad():
+                # Head-only ablation (disable LoRA optimizer, keep only ingredient-head params) is deferred to a future task.
+                batch_iou = sum(
+                    calculate_instance_iou(mask_logits.squeeze(1)[i], instance_mask[i])
+                    for i in range(image.size(0))
+                ) / image.size(0)
+                batch_dice = sum(
+                    calculate_instance_dice(mask_logits.squeeze(1)[i], instance_mask[i])
+                    for i in range(image.size(0))
+                ) / image.size(0)
+                acc = calculate_classification_accuracy(
+                    outputs["class_logits"], class_id
+                )
+
+            epoch_loss += losses['total_loss'].item()
+            epoch_mask_loss += losses['mask_loss'].item()
+            epoch_cls_loss += losses['classification_loss'].item()
+            epoch_iou += batch_iou
+            epoch_dice += batch_dice
+            epoch_acc += acc
+
+            progress_bar.set_postfix({
+                'Loss': f"{losses['total_loss'].item():.4f}",
+                'MaskL': f"{losses['mask_loss'].item():.4f}",
+                'ClsL': f"{losses['classification_loss'].item():.4f}",
+                'IoU': f"{batch_iou:.4f}",
+                'Dice': f"{batch_dice:.4f}",
+                'Acc': f"{acc:.4f}",
+                'LR': f"{self.optimizer.param_groups[0]['lr']:.6f}",
+            })
+
+            if (batch_idx + 1) % self.config.training.log_frequency == 0:
+                self._log_batch(batch_idx, losses, num_batches)
+
+        return {
+            'train_loss': epoch_loss / num_batches,
+            'train_mask_loss': epoch_mask_loss / num_batches,
+            'train_cls_loss': epoch_cls_loss / num_batches,
+            'train_iou': epoch_iou / num_batches,
+            'train_dice': epoch_dice / num_batches,
+            'train_acc': epoch_acc / num_batches,
+            'learning_rate': self.optimizer.param_groups[0]['lr'],
+        }
+
+    def _validate_epoch_ingredient(self) -> Dict[str, float]:
+        """Validate for one epoch in ingredient mode."""
+        self.model.eval()
+        total_iou = 0.0
+        total_dice = 0.0
+        total_acc = 0.0
+        num_samples = 0
+
+        with torch.no_grad():
+            for batch in tqdm.tqdm(self.val_loader, desc="Validation [ingredient]"):
+                image = batch['image'].to(self.device)
+                instance_mask = batch['instance_mask'].to(self.device)
+                class_id = batch['class_id'].to(self.device)
+
+                prompts = {
+                    'points': batch['prompts']['points'].to(self.device),
+                    'point_labels': batch['prompts']['point_labels'].to(self.device),
+                }
+                outputs = self.model.forward_instance(image, prompts)
+                mask_logits = self.model.resize_predictions(
+                    outputs["mask_logits"], instance_mask.shape[-2:]
+                )
+
+                batch_size = image.size(0)
+                for i in range(batch_size):
+                    iou = calculate_instance_iou(
+                        mask_logits.squeeze(1)[i], instance_mask[i]
+                    )
+                    dice = calculate_instance_dice(
+                        mask_logits.squeeze(1)[i], instance_mask[i]
+                    )
+                    total_iou += iou
+                    total_dice += dice
+
+                acc = calculate_classification_accuracy(
+                    outputs["class_logits"], class_id
+                )
+                total_acc += acc * batch_size
+                num_samples += batch_size
+
+        return {
+            'val_miou': total_iou / num_samples,
+            'val_dice': total_dice / num_samples,
+            'val_acc': total_acc / num_samples,
+        }
+
     def _log_batch(self, batch_idx: int, losses: Dict[str, torch.Tensor], num_batches: int):
         """Log batch statistics"""
         if self.config.system.use_wandb:
             import wandb
-            wandb.log({
-                'train/batch_loss': losses['total_loss'].item(),
-                'train/batch_dice_loss': losses['dice_loss'].item(),
-                'train/batch_bce_loss': losses['bce_loss'].item(),
-                'train/learning_rate': self.optimizer.param_groups[0]['lr']
-            })
+            log_dict = {'train/batch_loss': losses['total_loss'].item()}
+            if 'dice_loss' in losses:
+                log_dict['train/batch_dice_loss'] = losses['dice_loss'].item()
+                log_dict['train/batch_bce_loss'] = losses['bce_loss'].item()
+            if 'mask_loss' in losses:
+                log_dict['train/batch_mask_loss'] = losses['mask_loss'].item()
+            if 'classification_loss' in losses:
+                log_dict['train/batch_classification_loss'] = losses['classification_loss'].item()
+            log_dict['train/learning_rate'] = self.optimizer.param_groups[0]['lr']
+            wandb.log(log_dict)
     
     def _log_epoch(self, epoch_stats: Dict[str, float]):
         """Log epoch statistics"""
