@@ -36,6 +36,7 @@ except ImportError:
 
 from pathlib import Path
 from configs.config import Config
+from src.models.ingredient_head import IngredientClassificationHead
 
 
 class SAMLoRAModel(nn.Module):
@@ -60,6 +61,14 @@ class SAMLoRAModel(nn.Module):
         
         # Freeze the image encoder
         self._freeze_image_encoder()
+
+        self.ingredient_head = None
+        if self.config.model.use_ingredient_head:
+            self.ingredient_head = IngredientClassificationHead(
+                in_dim=self._infer_region_feature_dim(),
+                hidden_dim=self.config.model.ingredient_head_hidden_dim,
+                num_classes=self.config.model.num_ingredient_classes,
+            )
         
     def _load_sam_model(self):
         """Load the base SAM model"""
@@ -382,6 +391,61 @@ class SAMLoRAModel(nn.Module):
             pred_masks = pred_masks.squeeze(1)
         
         return pred_masks
+
+    def _infer_region_feature_dim(self) -> int:
+        for attr_name in ("output_dim", "out_channels", "embed_dim", "hidden_dim"):
+            attr_value = getattr(self.image_encoder, attr_name, None)
+            if isinstance(attr_value, int) and attr_value > 0:
+                return attr_value
+
+        for module in reversed(list(self.image_encoder.modules())):
+            if isinstance(module, nn.Conv2d):
+                return module.out_channels
+            if isinstance(module, nn.Linear):
+                return module.out_features
+
+        return 256
+
+    def _ensure_ingredient_head(self, feature_dim: int, device: torch.device) -> None:
+        if not self.config.model.use_ingredient_head:
+            return
+
+        needs_init = self.ingredient_head is None
+        if not needs_init:
+            needs_init = self.ingredient_head.net[0].in_features != feature_dim
+
+        if needs_init:
+            self.ingredient_head = IngredientClassificationHead(
+                in_dim=feature_dim,
+                hidden_dim=self.config.model.ingredient_head_hidden_dim,
+                num_classes=self.config.model.num_ingredient_classes,
+            ).to(device)
+
+    def forward_instance(self, image: torch.Tensor, prompts: Dict) -> Dict[str, Optional[torch.Tensor]]:
+        image_embeddings = self.image_encoder(image)
+        mask_logits = self.sam_model(image_embeddings, prompts)
+
+        if isinstance(mask_logits, tuple):
+            mask_logits = mask_logits[0]
+
+        embedding_mask = self.resize_predictions(mask_logits, target_size=image_embeddings.shape[-2:])
+        embedding_mask = torch.sigmoid(embedding_mask)
+        weighted_embeddings = image_embeddings * embedding_mask
+        mask_area = embedding_mask.sum(dim=(-2, -1)).clamp_min(1e-6)
+        region_features = weighted_embeddings.sum(dim=(-2, -1)) / mask_area
+
+        mask_logits = self.resize_predictions(mask_logits, target_size=image.shape[-2:])
+        class_logits = None
+
+        if self.config.model.use_ingredient_head:
+            self._ensure_ingredient_head(region_features.shape[1], region_features.device)
+            class_logits = self.ingredient_head(region_features)
+
+        return {
+            "mask_logits": mask_logits,
+            "class_logits": class_logits,
+            "region_features": region_features,
+        }
         
     def _freeze_image_encoder(self):
         """Freeze the image encoder parameters"""
@@ -413,6 +477,11 @@ class SAMLoRAModel(nn.Module):
         for name, param in self.prompt_encoder.named_parameters():
             if param.requires_grad:
                 trainable_params.append(param)
+
+        if self.ingredient_head is not None:
+            for param in self.ingredient_head.parameters():
+                if param.requires_grad:
+                    trainable_params.append(param)
         
         return trainable_params
     
