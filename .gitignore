@@ -59,7 +59,7 @@ Thumbs.db
 .env.local
 
 # Data
-data/
+/data/
 wandb/
 checkpoints/
 UECFOODPIX.*
