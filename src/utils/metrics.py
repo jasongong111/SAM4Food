@@ -337,6 +337,92 @@ def compare_with_baselines(model, dataloader, config, device,
     return comparison
 
 
+# ---------------------------------------------------------------------------
+# Instance-level classification and mask metrics (ingredient-aware extension)
+# ---------------------------------------------------------------------------
+
+def calculate_classification_accuracy(
+    logits: torch.Tensor, target: torch.Tensor
+) -> float:
+    """Top-1 ingredient classification accuracy.
+
+    Args:
+        logits: Shape (B, num_classes).
+        target: Ground-truth class indices, shape (B,).
+
+    Returns:
+        Accuracy in [0, 1].
+    """
+    preds = logits.argmax(dim=1)
+    return (preds == target).float().mean().item()
+
+
+def calculate_topk_accuracy(
+    logits: torch.Tensor, target: torch.Tensor, k: int = 5
+) -> float:
+    """Top-k ingredient classification accuracy.
+
+    Args:
+        logits: Shape (B, num_classes).
+        target: Ground-truth class indices, shape (B,).
+        k: Number of top predictions to consider.
+
+    Returns:
+        Top-k accuracy in [0, 1].
+    """
+    batch_size = target.size(0)
+    _, topk_preds = logits.topk(k, dim=1, largest=True, sorted=True)
+    correct = topk_preds.eq(target.unsqueeze(1).expand_as(topk_preds))
+    return correct.any(dim=1).float().sum().item() / batch_size
+
+
+def calculate_instance_iou(
+    pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5
+) -> float:
+    """IoU for a single prompted instance mask.
+
+    Args:
+        pred: Logits or probabilities of shape (1, H, W) or (H, W).
+        target: Binary ground truth of shape (H, W).
+        threshold: Binarisation threshold applied after sigmoid.
+
+    Returns:
+        IoU value in [0, 1].
+    """
+    if pred.dim() == 3:
+        pred = torch.sigmoid(pred.squeeze(0))
+    pred_binary = (pred > threshold).float()
+
+    intersection = (pred_binary * target).sum()
+    union = pred_binary.sum() + target.sum() - intersection
+    if union == 0:
+        return 1.0 if target.sum() == 0 else 0.0
+    return (intersection / union).item()
+
+
+def calculate_instance_dice(
+    pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5
+) -> float:
+    """Dice coefficient for a single prompted instance mask.
+
+    Args:
+        pred: Logits or probabilities of shape (1, H, W) or (H, W).
+        target: Binary ground truth of shape (H, W).
+        threshold: Binarisation threshold applied after sigmoid.
+
+    Returns:
+        Dice coefficient in [0, 1].
+    """
+    if pred.dim() == 3:
+        pred = torch.sigmoid(pred.squeeze(0))
+    pred_binary = (pred > threshold).float()
+
+    denom = pred_binary.sum() + target.sum()
+    if denom == 0:
+        return 1.0 if target.sum() == 0 else 0.0
+    return (2.0 * (pred_binary * target).sum() / denom).item()
+
+
 def create_metric_plots(history: Dict, save_dir: str):
     """
     Create plots for training and evaluation metrics
