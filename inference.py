@@ -165,6 +165,11 @@ if __name__ == "__main__":
     print("  3. Ensure the UECFOODPIX dataset is available at:")
     print("     UECFOODPIX/data/UECFoodPIX/{train,test}/img/")
     print()
+    print("Ingredient-mode (programmatic API):")
+    print("  Use run_ingredient_inference(model, image_tensor, prompts_list, config,")
+    print("  class_names=None) to obtain a semantic map and accepted ingredient names.")
+    print("  See README.md § 'SAM4Food-Sem: Ingredient-Aware Segmentation' for details.")
+    print()
     print("Running UECFOODPIX inference ...")
     print()
 

@@ -8,6 +8,7 @@ and generating comprehensive analysis reports.
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import cv2
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -468,3 +469,127 @@ FN: {metrics['fn']}, TN: {metrics['tn']}
         print(f"Evaluation report saved to {report_path}")
         
         return report_text
+
+
+def colorize_semantic_map(semantic_map, num_classes=103) -> np.ndarray:
+    """
+    Convert a semantic map of class IDs to an RGB color image.
+
+    Args:
+        semantic_map: (H, W) numpy array or torch.Tensor of class IDs (0 = background).
+        num_classes: Total number of classes (excluding background).
+
+    Returns:
+        (H, W, 3) uint8 RGB array with a distinct color per class ID.
+        Background (class 0) is black. Colors are reproducible across calls.
+    """
+    if hasattr(semantic_map, 'numpy'):
+        semantic_map = semantic_map.numpy()
+    semantic_map = np.asarray(semantic_map, dtype=np.int64)
+
+    rng = np.random.RandomState(seed=42)
+    # Pre-generate colors for all possible class IDs (1-indexed)
+    palette = rng.randint(50, 256, size=(num_classes + 1, 3), dtype=np.uint8)
+    palette[0] = [0, 0, 0]  # background = black
+
+    H, W = semantic_map.shape
+    rgb = np.zeros((H, W, 3), dtype=np.uint8)
+
+    unique_ids = np.unique(semantic_map)
+    for cid in unique_ids:
+        # Modulo wraps IDs > num_classes to prevent index-out-of-bounds.
+        # In normal use (class IDs 0–num_classes), this is always a no-op.
+        idx = int(cid) % (num_classes + 1)
+        rgb[semantic_map == cid] = palette[idx]
+
+    return rgb
+
+
+def visualize_semantic_map(image_np, semantic_map, class_names_dict,
+                           save_path=None, title=None, num_classes=103) -> "plt.Figure":
+    """
+    Render a food image with a colored semantic overlay and ingredient name labels.
+
+    Args:
+        image_np: (H, W, 3) numpy array, float [0,1] or uint8.
+        semantic_map: (H, W) long tensor or numpy array with class IDs (0 = background).
+        class_names_dict: {class_id (int): "ingredient_name" (str)} mapping.
+        save_path: If given, save the figure to this path.
+        title: Optional figure title.
+        num_classes: Total number of classes (excluding background). Defaults to 103.
+
+    Returns:
+        matplotlib Figure.
+    """
+    if hasattr(semantic_map, 'numpy'):
+        sem_np = semantic_map.numpy().astype(np.int64)
+    else:
+        sem_np = np.asarray(semantic_map, dtype=np.int64)
+
+    # Normalise image to float [0, 1]
+    img = np.asarray(image_np, dtype=np.float32)
+    if img.max() > 1.0:
+        img = img / 255.0
+    img = np.clip(img, 0.0, 1.0)
+
+    effective_num_classes = max(num_classes, int(sem_np.max()))
+    color_map = colorize_semantic_map(sem_np, num_classes=effective_num_classes)  # (H, W, 3) uint8
+    color_float = color_map.astype(np.float32) / 255.0
+
+    # Blend: 60% original, 40% color overlay (background stays mostly original)
+    alpha = 0.4
+    overlay = img.copy()
+    fg_mask = sem_np > 0
+    overlay[fg_mask] = (1 - alpha) * img[fg_mask] + alpha * color_float[fg_mask]
+
+    # Collect legend entries for classes present in this image
+    present_ids = sorted([int(c) for c in np.unique(sem_np) if int(c) != 0])
+
+    fig, axes = plt.subplots(1, 1, figsize=(10, 8))
+    axes.imshow(overlay)
+    if title:
+        axes.set_title(title, fontsize=14, fontweight='bold')
+    axes.axis('off')
+
+    # Place text labels at region centroids (only for regions > 100 px)
+    for cid in present_ids:
+        pixels = np.argwhere(sem_np == cid)
+        if len(pixels) < 100:
+            continue
+        cy, cx = pixels.mean(axis=0)
+        name = class_names_dict.get(cid, str(cid))
+        axes.text(
+            cx, cy, name,
+            fontsize=7, color='white', fontweight='bold',
+            ha='center', va='center',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5, linewidth=0),
+        )
+
+    # Build legend from color_map so overlay and legend use identical colors
+    if present_ids:
+        legend_patches = []
+        for cid in present_ids:
+            mask_pixels = color_map[sem_np == cid]
+            if len(mask_pixels) > 0:
+                r, g, b = mask_pixels[0].astype(float) / 255.0
+                name = class_names_dict.get(cid, str(cid))
+                legend_patches.append(Patch(facecolor=(r, g, b), label=name))
+
+        axes.legend(
+            handles=legend_patches,
+            loc='upper left',
+            bbox_to_anchor=(1.01, 1),
+            borderaxespad=0,
+            fontsize=8,
+            title='Ingredients',
+            title_fontsize=9,
+            framealpha=0.8,
+        )
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+    return fig

@@ -79,7 +79,7 @@ curl -L -o checkpoints/best_model.pth \
 
 ## Dataset Setup
 
-### Download FoodSeg103
+### FoodSeg103 (Alternative)
 
 Download the dataset from: https://github.com/L1016517444/FoodSeg103
 
@@ -231,3 +231,96 @@ The notebook provides interactive inference with visualization.
 - [Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything) by Meta AI
 - [FoodSeg103 Dataset](https://github.com/L1016517444/FoodSeg103)
 - [PEFT](https://github.com/huggingface/peft) for parameter-efficient fine-tuning
+
+---
+
+## SAM4Food-Sem: Ingredient-Aware Segmentation
+
+### Overview
+
+SAM4Food-Sem extends the binary food segmentation pipeline with **ingredient-level recognition**. The approach combines:
+
+- **SAM + LoRA**: SAM's image encoder and mask decoder, fine-tuned with low-rank adapters (LoRA) for food images.
+- **Ingredient head**: A lightweight linear classification head attached to each mask proposal, predicting one of the 103 FoodInsSeg ingredient categories.
+- **Prompted aggregation**: Multiple SAM prompts (one per candidate instance) are run, and the resulting `(mask, class_id, confidence)` triples are merged via non-maximum suppression into a single semantic map.
+- **Named outputs**: The final semantic map is rendered with colored per-ingredient overlays and text labels using `visualize_semantic_map` / `colorize_semantic_map` from `src/utils/visualization.py`.
+
+### FoodInsSeg Dataset Setup
+
+Download the FoodInsSeg dataset and arrange it in the following structure before training or evaluation:
+
+```
+FoodInsSeg/
+├── ImageSets/
+│   ├── train.txt      # newline-separated image IDs for training
+│   ├── val.txt        # newline-separated image IDs for validation
+│   └── test.txt       # newline-separated image IDs for testing
+├── JPEGImages/        # source images as .jpg files (named by image ID)
+├── Annotations/       # per-image JSON annotation files
+└── class_names.json   # {"class_id": "ingredient_name", ...} mapping
+```
+
+Pass `--dataset_path /path/to/FoodInsSeg` and `--dataset_name FoodInsSeg` to `main.py`.
+
+### Training
+
+**Train with ingredient head (FoodInsSeg + LoRA):**
+
+```bash
+python main.py --mode train --sam_checkpoint sam_vit_b_01ec64.pth \
+  --use_ingredient_head --dataset_name FoodInsSeg --dataset_path /path/to/FoodInsSeg \
+  --batch_size 1
+```
+
+**Head-only ablation (ingredient head, no LoRA):**
+
+> **Note:** Head-only ablation (frozen SAM, no LoRA, ingredient head only) is supported via
+> `--lora_rank 0`. This sets the LoRA rank to 0, effectively disabling the LoRA adapters.
+
+Checkpoints are saved to `checkpoints/` after each epoch; the best validation checkpoint is written to `checkpoints/best_model.pth`.
+
+### Evaluation
+
+```bash
+python main.py --mode eval --sam_checkpoint sam_vit_b_01ec64.pth \
+  --trained_checkpoint checkpoints/best_model.pth \
+  --use_ingredient_head --dataset_name FoodInsSeg --dataset_path /path/to/FoodInsSeg
+```
+
+Reports per-class and mean IoU across the 103 ingredient categories.
+
+### Aggregation Inference (Programmatic)
+
+For running ingredient-aware inference on a single image programmatically, use `run_ingredient_inference` from `inference.py`:
+
+```bash
+python inference.py
+```
+
+The `run_ingredient_inference(model, image_tensor, prompts_list, config, class_names=None)` function accepts a list of prompt dicts (one per candidate region), runs each through the model, and aggregates the results into a single `semantic_map` (LongTensor, H×W) and a list of accepted `class_names`.
+
+### Named Segmentation Output
+
+After running `run_ingredient_inference`, render the result with ingredient name labels using the standalone visualization utilities:
+
+```python
+from src.utils.visualization import visualize_semantic_map, colorize_semantic_map
+
+# semantic_map: LongTensor or numpy (H, W) with class IDs
+# class_names_dict: {class_id: "ingredient_name"}
+fig = visualize_semantic_map(image_np, semantic_map, class_names_dict,
+                             save_path="output_named.png",
+                             title="Ingredient Segmentation")
+```
+
+- `colorize_semantic_map(semantic_map, num_classes=103)` returns a `(H, W, 3)` uint8 RGB array with a consistent, seed-fixed color per ingredient class (background = black).
+- `visualize_semantic_map(...)` renders the image with a blended color overlay, places ingredient name labels at region centroids (regions ≥ 100 px), and draws a legend panel listing color → ingredient name.
+
+### Binary Baseline
+
+The original binary food segmentation pipeline (FoodSeg103 dataset, no ingredient head) remains fully functional with the default configuration:
+
+```bash
+python main.py --mode train --sam_checkpoint sam_vit_b_01ec64.pth
+python inference.py
+```
