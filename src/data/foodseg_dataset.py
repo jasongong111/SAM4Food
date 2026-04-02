@@ -367,10 +367,44 @@ class FoodSeg103Dataset(Dataset):
         return [x, y, x + w, y + h]
 
 
+def create_foodinsseg_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
+    """Create FoodInsSeg (COCO format) training and validation data loaders."""
+    from .foodinsseg_dataset import FoodInsSegDataset
+
+    train_dataset = FoodInsSegDataset(config, split="train")
+    val_dataset = FoodInsSegDataset(config, split="val")
+
+    if config.system.debug and config.system.max_samples_for_debug > 0:
+        train_dataset.samples = train_dataset.samples[: config.system.max_samples_for_debug]
+        val_dataset.samples = val_dataset.samples[
+            : min(len(val_dataset.samples), config.system.max_samples_for_debug // 2)
+        ]
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=True,
+        num_workers=config.system.num_workers,
+        pin_memory=config.system.device == "cuda",
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        num_workers=config.system.num_workers,
+        pin_memory=config.system.device == "cuda",
+        drop_last=False,
+    )
+    return train_loader, val_loader
+
+
 def create_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
-    """Create training and validation data loaders"""
-    
-    # Create datasets
+    """Create training and validation data loaders. Dispatches by dataset_name."""
+    if config.data.dataset_name == "FoodInsSeg":
+        return create_foodinsseg_data_loaders(config)
+
+    # Create datasets (FoodSeg103)
     train_dataset = FoodSeg103Dataset(config, split='train')
     val_dataset = FoodSeg103Dataset(config, split='val')
     
