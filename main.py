@@ -20,7 +20,10 @@ from configs.config import Config
 from src.training.trainer import Trainer
 from src.utils.visualization import Visualizer
 from src.utils.metrics import evaluate_model, compare_with_baselines
-from src.data.foodseg_dataset import download_foodseg103_dataset
+from src.data.foodseg_dataset import (
+    download_foodseg103_dataset,
+    download_foodinsseg_dataset,
+)
 
 
 def _resolve_latest_trained_checkpoint(config: Config) -> str | None:
@@ -348,7 +351,8 @@ def download_dataset_if_needed(config, args):
             dataset_path = download_foodseg103_dataset()
             config.data.dataset_path = str(dataset_path)
         elif config.data.dataset_name == "FoodInsSeg":
-            config.data.dataset_path = "data/FoodInsSeg"
+            dataset_path = download_foodinsseg_dataset()
+            config.data.dataset_path = str(dataset_path)
         else:
             raise ValueError(
                 f"Dataset path must be provided for dataset '{config.data.dataset_name}'"

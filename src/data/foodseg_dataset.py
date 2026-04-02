@@ -7,6 +7,9 @@ including preprocessing, data augmentation, and prompt generation.
 
 import os
 import json
+import shutil
+import tempfile
+import zipfile
 import torch
 import cv2
 import numpy as np
@@ -459,4 +462,78 @@ def download_foodseg103_dataset() -> Path:
     except subprocess.CalledProcessError:
         print("Automatic download failed. Please download manually.")
         
+    return dataset_path
+
+
+# Google Drive file id for FoodInsSeg.zip (shared link -> uc?id=...)
+FOODINSSEG_DRIVE_FILE_ID = "1Wa8_j4flJOMM6a2QGpiPga0r1GC__Rg2"
+
+
+def _find_foodinsseg_root(search_dir: Path) -> Optional[Path]:
+    """Return directory that contains annotations/Train.json (COCO train split)."""
+    for train_json in search_dir.rglob("Train.json"):
+        if train_json.parent.name == "annotations":
+            return train_json.parent.parent
+    return None
+
+
+def download_foodinsseg_dataset(
+    dataset_path: Optional[Union[str, Path]] = None,
+    *,
+    drive_file_id: str = FOODINSSEG_DRIVE_FILE_ID,
+) -> Path:
+    """
+    Download FoodInsSeg from Google Drive and extract so that
+    ``<dataset_path>/annotations/Train.json`` exists.
+
+    Requires: ``pip install gdown``
+    """
+    try:
+        import gdown
+    except ImportError as e:
+        raise ImportError(
+            "FoodInsSeg auto-download requires gdown. Install with: pip install gdown"
+        ) from e
+
+    dataset_path = Path(dataset_path or "data/FoodInsSeg")
+    marker = dataset_path / "annotations" / "Train.json"
+    if marker.exists():
+        print(f"FoodInsSeg already present at {dataset_path}")
+        return dataset_path
+
+    dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    zip_path = dataset_path.parent / "FoodInsSeg.zip"
+    url = f"https://drive.google.com/uc?id={drive_file_id}"
+
+    print("Downloading FoodInsSeg from Google Drive...")
+    gdown.download(url, str(zip_path), quiet=False)
+
+    if not zip_path.is_file() or zip_path.stat().st_size == 0:
+        raise RuntimeError(f"Download failed or empty file: {zip_path}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmp_path)
+
+        found = _find_foodinsseg_root(tmp_path)
+        if found is None:
+            raise RuntimeError(
+                "Archive did not contain FoodInsSeg layout (expected annotations/Train.json)."
+            )
+
+        if dataset_path.exists():
+            shutil.rmtree(dataset_path)
+        shutil.move(str(found), str(dataset_path))
+
+    try:
+        zip_path.unlink()
+    except OSError:
+        pass
+
+    if not marker.exists():
+        raise RuntimeError(
+            f"Extraction finished but {marker} is missing. Check the zip layout."
+        )
+    print(f"FoodInsSeg ready at {dataset_path}")
     return dataset_path
