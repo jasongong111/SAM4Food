@@ -18,60 +18,69 @@ def _write_rgb_image(path: Path, size: int = 6) -> None:
     Image.fromarray(image).save(path)
 
 
-def _write_binary_mask(path: Path, size: int = 6) -> None:
-    mask = np.zeros((size, size), dtype=np.uint8)
-    mask[1:5, 2:4] = 255
-    Image.fromarray(mask).save(path)
-
-
-def _write_empty_mask(path: Path, size: int = 4) -> None:
-    mask = np.zeros((size, size), dtype=np.uint8)
-    Image.fromarray(mask).save(path)
-
-
-def _create_foodinsseg_fixture(
+def _create_foodinsseg_coco_fixture(
     tmp_path,
     *,
     split: str = "train",
-    mask_writer=_write_binary_mask,
-    image_size: int = 4,
+    image_size: int = 6,
+    has_valid_instance: bool = True,
 ):
+    """Create FoodInsSeg structure in COCO format."""
     dataset_root = tmp_path / "FoodInsSeg"
-    image_sets_dir = dataset_root / "ImageSets"
-    image_dir = dataset_root / "Images" / "img_dir" / split
-    annotation_dir = dataset_root / "Annotations" / split
-    mask_dir = annotation_dir / "masks"
+    image_dir = dataset_root / "images" / split
+    annotation_dir = dataset_root / "annotations"
 
-    image_sets_dir.mkdir(parents=True)
     image_dir.mkdir(parents=True)
-    mask_dir.mkdir(parents=True)
+    annotation_dir.mkdir(parents=True)
 
-    (image_sets_dir / f"{split}.txt").write_text("sample_001\n", encoding="utf-8")
-    (dataset_root / "class_names.json").write_text(
-        json.dumps({"7": "tomato"}), encoding="utf-8"
-    )
+    file_name = "00000001.jpg"
+    image_path = image_dir / file_name
+    _write_rgb_image(image_path, size=image_size)
 
-    _write_rgb_image(image_dir / "sample_001.jpg", size=image_size)
-    mask_writer(mask_dir / "sample_001_mask.png", size=image_size)
+    # Polygon for region [1:5, 2:4] in 6x6 (y,x order for polygon: x,y pairs)
+    # bbox [x,y,w,h] = [2,1,2,4]
+    if has_valid_instance:
+        # Polygon: rectangle (x,y) - (2,1), (4,1), (4,5), (2,5)
+        polygon = [[2, 1, 4, 1, 4, 5, 2, 5]]
+    else:
+        polygon = []
 
-    annotation_payload = {
-        "instances": [
+    ann_file = "Train.json" if split == "train" else "Test.json"
+    coco = {
+        "info": {},
+        "licenses": [],
+        "images": [
             {
-                "instance_id": 11,
-                "class_id": 7,
-                "mask_path": "masks/sample_001_mask.png",
+                "id": 1,
+                "width": image_size,
+                "height": image_size,
+                "file_name": file_name,
+            }
+        ],
+        "annotations": [
+            {
+                "id": 11,
+                "image_id": 1,
+                "category_id": 7,
+                "segmentation": polygon,
+                "area": 8.0 if has_valid_instance else 0.0,
+                "bbox": [2, 1, 2, 4] if has_valid_instance else [0, 0, 0, 0],
+                "iscrowd": 0,
             }
         ]
+        if has_valid_instance
+        else [],
+        "categories": [
+            {"id": 7, "name": "tomato"},
+        ],
     }
-    (annotation_dir / "sample_001.json").write_text(
-        json.dumps(annotation_payload), encoding="utf-8"
-    )
+    (annotation_dir / ann_file).write_text(json.dumps(coco), encoding="utf-8")
 
     return dataset_root
 
 
 def test_foodinsseg_loads_instance_sample_from_dataset(tmp_path):
-    dataset_root = _create_foodinsseg_fixture(tmp_path)
+    dataset_root = _create_foodinsseg_coco_fixture(tmp_path)
 
     config = Config()
     config.data.dataset_path = str(dataset_root)
@@ -88,7 +97,7 @@ def test_foodinsseg_loads_instance_sample_from_dataset(tmp_path):
     assert sample["class_name"] == "tomato"
     expected_first_channel = ((120 / 255.0) - config.data.mean[0]) / config.data.std[0]
     assert sample["image"][0, 0, 0].item() == pytest.approx(expected_first_channel)
-    assert sample["metadata"]["image_id"] == "sample_001"
+    assert sample["metadata"]["image_id"] == "1"
     assert sample["metadata"]["instance_id"] == 11
     assert sample["prompts"]["points"].shape[0] > 0
     assert "boxes" in sample["prompts"]
@@ -112,7 +121,7 @@ def test_foodinsseg_loads_instance_sample_from_dataset(tmp_path):
 
 
 def test_foodinsseg_respects_prompt_config_counts(tmp_path):
-    dataset_root = _create_foodinsseg_fixture(tmp_path)
+    dataset_root = _create_foodinsseg_coco_fixture(tmp_path)
 
     config = Config()
     config.data.dataset_path = str(dataset_root)
@@ -129,7 +138,7 @@ def test_foodinsseg_respects_prompt_config_counts(tmp_path):
 
 
 def test_foodinsseg_repeats_box_prompt_to_requested_count(tmp_path):
-    dataset_root = _create_foodinsseg_fixture(tmp_path)
+    dataset_root = _create_foodinsseg_coco_fixture(tmp_path)
 
     config = Config()
     config.data.dataset_path = str(dataset_root)
@@ -145,7 +154,7 @@ def test_foodinsseg_repeats_box_prompt_to_requested_count(tmp_path):
 
 
 def test_foodinsseg_skips_empty_instance_masks(tmp_path):
-    dataset_root = _create_foodinsseg_fixture(tmp_path, mask_writer=_write_empty_mask)
+    dataset_root = _create_foodinsseg_coco_fixture(tmp_path, has_valid_instance=False)
 
     config = Config()
     config.data.dataset_path = str(dataset_root)
@@ -156,7 +165,7 @@ def test_foodinsseg_skips_empty_instance_masks(tmp_path):
 
 
 def test_foodinsseg_val_split_reuses_test_files(tmp_path):
-    dataset_root = _create_foodinsseg_fixture(tmp_path, split="test")
+    dataset_root = _create_foodinsseg_coco_fixture(tmp_path, split="test")
 
     config = Config()
     config.data.dataset_path = str(dataset_root)
@@ -167,7 +176,7 @@ def test_foodinsseg_val_split_reuses_test_files(tmp_path):
 
     assert len(dataset) == 1
     assert sample["metadata"]["split"] == "val"
-    assert sample["metadata"]["image_id"] == "sample_001"
+    assert sample["metadata"]["image_id"] == "1"
 
 
 def test_foodinsseg_debug_mode_returns_synthetic_sample_when_dataset_missing(tmp_path):
