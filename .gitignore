@@ -21,12 +21,17 @@ wheels/
 *.egg
 *.pth
 
-# Virtual environments (venv - deprecated, now using conda)
+# Virtual environments
 venv/
 env/
 ENV/
+.venv/
 
-# Conda
+# Poetry
+# poetry.lock is tracked for reproducible installs
+.tmp-poetry-venv/
+
+# Conda (optional / legacy)
 .conda/
 
 # IDE
