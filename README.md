@@ -24,7 +24,7 @@ Fine-tuning the Segment Anything Model (SAM) with LoRA adapters for food image s
 
 - **Python**: 3.10+
 - **CUDA**: 11.7+ (for GPU training, optional but recommended)
-- **Conda**: Miniconda or Anaconda
+- **Poetry**: 1.8+ ([installation](https://python-poetry.org/docs/#installation))
 - **GPU Memory**: 16GB+ recommended for training
 
 ---
@@ -44,26 +44,30 @@ bash setup.sh
 ```
 
 The script will:
-- Create conda environment `sam4food`
+- Create a Poetry virtualenv at `.venv` (in-project) and install dependencies from `pyproject.toml`
 - Download SAM ViT-B checkpoint (~375MB)
 - Download pre-trained LoRA weights from HuggingFace
 - Create required directories
 
-After setup, activate the environment:
+After setup, use either:
 ```bash
-conda activate sam4food
+poetry shell
+python main.py --mode train --model_name vit_b --epochs 50
+```
+or prefix commands with `poetry run`:
+```bash
+poetry run python main.py --mode train --model_name vit_b --epochs 50
 ```
 
 ### Option 2: Manual Setup
 
 ```bash
-# Create conda environment
-conda env create -f environment.yml
-conda activate sam4food
-
-# Or use pip
-pip install -r requirements.txt
+poetry install
+# optional: poetry shell
+poetry run python main.py --help
 ```
+
+`requirements.txt` is kept in sync for reference; **Poetry (`pyproject.toml`) is the source of truth** for this branch.
 
 ### Download Model Checkpoints
 

@@ -1,51 +1,30 @@
 #!/bin/bash
 
-# Setup script for SAM Food Segmentation Project
+# Setup script for SAM Food Segmentation Project (Poetry-managed environment)
+
+set -e
 
 echo "Setting up SAM Food Segmentation Project..."
 
-# Check if conda is installed
-if ! command -v conda &> /dev/null; then
-    echo "❌ Conda is not installed. Please install Anaconda or Miniconda first."
-    echo "   Visit: https://docs.conda.io/en/latest/miniconda.html"
+# Check if Poetry is installed
+if ! command -v poetry &> /dev/null; then
+    echo "❌ Poetry is not installed."
+    echo "   Install: curl -sSL https://install.python-poetry.org | python3 -"
+    echo "   Docs: https://python-poetry.org/docs/#installation"
     exit 1
 fi
 
-echo "✅ Conda found: $(conda --version)"
+echo "✅ Poetry found: $(poetry --version)"
 
-# Initialize conda for bash shell (if not already initialized)
-eval "$(conda shell.bash hook)"
+# Install dependencies from pyproject.toml / poetry.lock
+echo ""
+echo "📦 Installing dependencies (Poetry)..."
+poetry install
 
-# Check if environment already exists
-if conda env list | grep -q "^sam4food "; then
-    echo "⚠️  Conda environment 'sam4food' already exists."
-    echo "Activating existing environment..."
-    conda activate sam4food
-    echo "✅ Environment activated"
-    echo ""
-    echo "To recreate the environment, run: conda env remove -n sam4food -y && bash setup.sh"
-    echo ""
-    echo "Continuing with existing environment..."
-    # Continue with rest of setup (checkpoints, directories, etc.)
-else
-    # Create conda environment from environment.yml
-    if [ -f "environment.yml" ]; then
-        echo "Creating conda environment from environment.yml..."
-        conda env create -f environment.yml
-    else
-        echo "❌ environment.yml not found. Creating environment manually..."
-        conda create -n sam4food python=3.10 -y
-        conda activate sam4food
-        echo "Installing requirements..."
-        pip install -r requirements.txt
-    fi
-    
-    # Activate the environment
-    echo "Activating conda environment..."
-    conda activate sam4food
-    
-    echo "✅ Conda environment 'sam4food' is ready!"
-fi
+echo ""
+echo "✅ Virtual environment ready at .venv (in-project)"
+echo "   Run commands with: poetry run python main.py ..."
+echo "   Or open a shell:   poetry shell"
 
 # SAM checkpoint download
 echo ""
@@ -58,7 +37,7 @@ else
 fi
 echo ""
 echo "   Using default path: ./sam_vit_b_01ec64.pth"
-echo "   Example: python main.py --mode train --model_path sam_vit_b_01ec64.pth"
+echo "   Example: poetry run python main.py --mode train --model_path sam_vit_b_01ec64.pth"
 echo ""
 
 # Create necessary directories
@@ -81,7 +60,7 @@ else
 fi
 echo ""
 
-# Set up environment variables
+# Set up environment variables (optional; poetry run inherits cwd)
 echo "Setting up environment..."
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 export CUDA_VISIBLE_DEVICES=0
@@ -89,11 +68,12 @@ export CUDA_VISIBLE_DEVICES=0
 echo ""
 echo "🎉 Setup complete!"
 echo ""
-echo "To activate the conda environment in future sessions, run:"
-echo "  conda activate sam4food"
+echo "Activate the venv in new shells:"
+echo "  poetry shell"
+echo "  # or: source .venv/bin/activate"
 echo ""
 echo "Next steps:"
-echo "1. Download FoodSeg103 dataset to data/FoodSeg103/"
-echo "2. Run: python main.py --mode train --model_name vit_b --epochs 50"
+echo "1. Download FoodSeg103 dataset to data/FoodSeg103/ (or use FoodInsSeg)"
+echo "2. Run: poetry run python main.py --mode train --model_name vit_b --epochs 50"
 echo ""
-echo "For help: python main.py --help"
+echo "For help: poetry run python main.py --help"
