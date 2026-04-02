@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "sam4food"
+version = "0.1.0"
+description = "Fine-tuning SAM with LoRA for food image segmentation (FoodSeg103 / FoodInsSeg)"
+readme = "README.md"
+license = "MIT"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+torch = ">=2.0.0"
+torchvision = ">=0.15.0"
+numpy = ">=1.21.0"
+pandas = ">=1.3.0"
+pillow = ">=8.3.0"
+matplotlib = ">=3.5.0"
+seaborn = ">=0.12.0"
+scikit-image = ">=0.18.0"
+tqdm = ">=4.62.0"
+albumentations = ">=1.3.0"
+segment-anything = { git = "https://github.com/facebookresearch/segment-anything.git" }
+peft = ">=0.4.0"
+transformers = ">=4.25.0"
+accelerate = ">=0.20.0"
+bitsandbytes = ">=0.39.0"
+torchmetrics = ">=0.11.0"
+scikit-learn = ">=1.0.0"
+opencv-python = ">=4.5.0"
+deepspeed = ">=0.12.0"
+wandb = ">=0.13.0"
+gdown = ">=4.7.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
