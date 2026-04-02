@@ -1,6 +1,8 @@
 # SAM4Food: Food Segmentation with LoRA Fine-tuned SAM
 
-Fine-tuning the Segment Anything Model (SAM) with LoRA adapters for food image segmentation using the FoodSeg103 dataset.
+Fine-tuning the Segment Anything Model (SAM) with LoRA adapters for food image segmentation.
+
+**Branch `feature/foodinsseg-sem`:** extends the binary [FoodSeg103](#foodseg103-binary-segmentation-default) pipeline with **ingredient-aware segmentation** on [FoodInsSeg](#foodinsseg-ingredient-mode) (classification head + prompted aggregation). See [SAM4Food-Sem](#sam4food-sem-ingredient-aware-segmentation).
 
 ---
 
@@ -12,6 +14,9 @@ Fine-tuning the Segment Anything Model (SAM) with LoRA adapters for food image s
 4. [Quick Start](#quick-start)
 5. [Training](#training)
 6. [Inference](#inference)
+7. [SAM4Food-Sem: Ingredient-Aware Segmentation](#sam4food-sem-ingredient-aware-segmentation)
+8. [Results](#results)
+9. [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -31,7 +36,7 @@ Fine-tuning the Segment Anything Model (SAM) with LoRA adapters for food image s
 Run the setup script which handles environment creation, checkpoint downloads, and directory setup:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/jasongong111/SAM4Food.git
 cd SAM4Food
 
 # Run automated setup
@@ -79,7 +84,7 @@ curl -L -o checkpoints/best_model.pth \
 
 ## Dataset Setup
 
-### FoodSeg103 (Alternative)
+### FoodSeg103 (binary segmentation, default)
 
 Download the dataset from: https://github.com/L1016517444/FoodSeg103
 
@@ -99,6 +104,10 @@ data/FoodSeg103/
 │   └── test.txt          # Test image IDs
 └── category_id.txt       # Category definitions
 ```
+
+### FoodInsSeg (ingredient mode)
+
+Use this dataset when training or evaluating with `--use_ingredient_head` and `--dataset_name FoodInsSeg`. Layout and CLI examples are documented under [SAM4Food-Sem](#sam4food-sem-ingredient-aware-segmentation).
 
 ---
 
@@ -125,7 +134,7 @@ jupyter notebook inference.ipynb
 
 ```bash
 python main.py --mode train \
-  --model_path sam_vit_b_01ec64.pth \
+  --sam_checkpoint sam_vit_b_01ec64.pth \
   --model_name vit_b \
   --epochs 50
 ```
@@ -138,7 +147,7 @@ python main.py --mode train \
 
 ```bash
 python main.py --mode train \
-  --model_path sam_vit_b_01ec64.pth \
+  --sam_checkpoint sam_vit_b_01ec64.pth \
   --model_name vit_b \
   --epochs 50 \
   --batch_size 4 \
@@ -149,7 +158,7 @@ python main.py --mode train \
 
 ```bash
 python main.py --mode train \
-  --model_path sam_vit_b_01ec64.pth \
+  --sam_checkpoint sam_vit_b_01ec64.pth \
   --model_name vit_b \
   --epochs 100 \
   --batch_size 8 \
@@ -162,7 +171,7 @@ python main.py --mode train \
 
 ```bash
 python main.py --mode train \
-  --model_path sam_vit_b_01ec64.pth \
+  --sam_checkpoint sam_vit_b_01ec64.pth \
   --resume checkpoints/best_model.pth \
   --epochs 100
 ```
@@ -171,29 +180,41 @@ python main.py --mode train \
 
 ```bash
 python main.py --mode full \
-  --model_path sam_vit_b_01ec64.pth \
+  --sam_checkpoint sam_vit_b_01ec64.pth \
   --epochs 50
 ```
 
-### All Training Arguments
+### All CLI Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--mode` | `train` | Execution mode: `train`, `eval`, `visualize`, `full` |
-| `--model_name` | `vit_b` | SAM architecture: `vit_b`, `vit_l`, `vit_h` |
-| `--model_path` | Required | Path to SAM checkpoint |
-| `--resume` | None | Path to resume training from |
-| `--epochs` | 50 | Number of training epochs |
-| `--batch_size` | 4 | Training batch size |
+| `--mode` | `train` | `train`, `eval`, `visualize`, or `full` |
+| `--model_name` | `vit_b` | SAM backbone: `vit_b`, `vit_l`, `vit_h` |
+| `--sam_checkpoint` | (required) | Path to base SAM weights (`--model_path` is accepted as a legacy alias) |
+| `--trained_checkpoint` | — | Trained LoRA/task checkpoint; required for `eval` and `visualize` |
+| `--resume` | — | Resume training from this checkpoint |
+| `--epochs` | 50 | Training epochs |
+| `--batch_size` | 4 | Batch size |
 | `--learning_rate` | 1e-4 | Learning rate |
-| `--lora_rank` | 8 | LoRA adapter rank |
-| `--dataset_path` | None | Custom dataset path |
-| `--image_size` | 1024 | Input image size |
-| `--device` | `auto` | Device: `auto`, `cuda`, `cpu` |
-| `--num_workers` | 4 | Data loading workers |
-| `--debug` | False | Enable debug mode |
-| `--no_wandb` | False | Disable W&B logging |
-| `--output_dir` | `outputs` | Output directory |
+| `--lora_rank` | 8 | LoRA rank; use `0` for head-only ablation (no LoRA) in ingredient mode |
+| `--use_ingredient_head` / `--no_use_ingredient_head` | config | Enable ingredient classification head |
+| `--num_ingredient_classes` | config | Number of ingredient classes |
+| `--ingredient_head_hidden_dim` | config | Ingredient MLP hidden width |
+| `--classification_loss_weight` | config | Weight for classification loss |
+| `--mask_loss_weight` | config | Weight for mask loss |
+| `--dataset_name` | config | e.g. `FoodSeg103` or `FoodInsSeg` |
+| `--dataset_path` | — | Root path to the dataset |
+| `--image_size` | 1024 | Input resolution |
+| `--device` | `auto` | `auto`, `cuda`, or `cpu` |
+| `--num_workers` | 4 | DataLoader workers |
+| `--debug` | off | Small/debug runs |
+| `--no_wandb` | off | Disable Weights & Biases |
+| `--output_dir` | `outputs` | Outputs and logs |
+| `--use_prompted_aggregation` / `--no_use_prompted_aggregation` | config | Ingredient-mode aggregation |
+| `--aggregation_score_threshold` | config | Min score to keep a mask in aggregation |
+| `--aggregation_iou_threshold` | config | IoU merge threshold |
+| `--max_prompts_per_image` | config | Cap on prompts per image |
+| `--visualization_samples` | 20 | Samples for `visualize` / `full` |
 
 ---
 
@@ -324,3 +345,7 @@ The original binary food segmentation pipeline (FoodSeg103 dataset, no ingredien
 python main.py --mode train --sam_checkpoint sam_vit_b_01ec64.pth
 python inference.py
 ```
+
+### Further Reading
+
+- Implementation notes and task history: `docs/superpowers/handoffs/2026-03-17-sam4food-sem-handoff.md`
