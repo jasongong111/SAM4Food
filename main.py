@@ -347,6 +347,8 @@ def download_dataset_if_needed(config, args):
         if config.data.dataset_name == "FoodSeg103":
             dataset_path = download_foodseg103_dataset()
             config.data.dataset_path = str(dataset_path)
+        elif config.data.dataset_name == "FoodInsSeg":
+            config.data.dataset_path = "data/FoodInsSeg"
         else:
             raise ValueError(
                 f"Dataset path must be provided for dataset '{config.data.dataset_name}'"
