@@ -7,8 +7,6 @@ uses binary mask metrics only (no ingredient labels).
 """
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR
@@ -16,7 +14,7 @@ from torch.amp import GradScaler, autocast
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 import tqdm
 from datetime import datetime
 import json
@@ -31,85 +29,6 @@ from ..utils.metrics import (
     calculate_instance_dice,
 )
 from .losses import JointIngredientLoss
-
-
-class DiceLoss(nn.Module):
-    """
-    Dice Loss implementation for mask segmentation
-    """
-    
-    def __init__(self, smooth: float = 1e-6):
-        super().__init__()
-        self.smooth = smooth
-    
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Calculate Dice loss
-        
-        Args:
-            pred: Predicted masks (B, H, W)
-            target: Ground truth masks (B, H, W)
-        
-        Returns:
-            Dice loss value
-        """
-        # Apply sigmoid to predictions
-        pred_sigmoid = torch.sigmoid(pred)
-        
-        # Flatten for calculation
-        pred_flat = pred_sigmoid.view(-1)
-        target_flat = target.view(-1)
-        
-        # Calculate intersection and union
-        intersection = (pred_flat * target_flat).sum()
-        union = pred_flat.sum() + target_flat.sum()
-        
-        # Calculate Dice coefficient
-        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-        
-        # Return Dice loss (1 - Dice)
-        return 1.0 - dice
-
-
-class BCEWithLogitsLoss(nn.Module):
-    """
-    Binary Cross-Entropy loss with logits (for training stability)
-    """
-    
-    def __init__(self, pos_weight: Optional[torch.Tensor] = None):
-        super().__init__()
-        self.pos_weight = pos_weight
-    
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return F.binary_cross_entropy_with_logits(
-            pred, target.float(), pos_weight=self.pos_weight
-        )
-
-
-class CombinedLoss(nn.Module):
-    """
-    Combined loss function with Dice and BCE
-    """
-    
-    def __init__(self, dice_weight: float = 0.5, use_pos_weight: bool = True):
-        super().__init__()
-        self.dice_weight = dice_weight
-        self.bce_weight = 1.0 - dice_weight
-        
-        self.dice_loss = DiceLoss()
-        self.bce_loss = BCEWithLogitsLoss()
-        
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> Dict[str, torch.Tensor]:
-        dice = self.dice_loss(pred, target)
-        bce = self.bce_loss(pred, target)
-        
-        combined_loss = self.dice_weight * dice + self.bce_weight * bce
-        
-        return {
-            'total_loss': combined_loss,
-            'dice_loss': dice,
-            'bce_loss': bce
-        }
 
 
 class Trainer:
@@ -132,14 +51,10 @@ class Trainer:
         # Initialize model
         self.model = SAMLoRAModel(config).to(self.device)
         
-        # Initialize loss function
-        if config.model.use_ingredient_head:
-            self.criterion = JointIngredientLoss(
-                mask_weight=config.training.mask_loss_weight,
-                class_weight=config.training.classification_loss_weight,
-            )
-        else:
-            self.criterion = CombinedLoss(dice_weight=config.training.dice_weight)
+        self.criterion = JointIngredientLoss(
+            mask_weight=config.training.mask_loss_weight,
+            class_weight=config.training.classification_loss_weight,
+        )
         
         # Initialize optimizer
         self.optimizer = self._setup_optimizer()
@@ -188,6 +103,7 @@ class Trainer:
             shuffle=True,
             num_workers=config.system.num_workers,
             pin_memory=pin,
+            drop_last=True,
         )
         self.val_loader = DataLoader(
             val_dataset,
@@ -195,6 +111,7 @@ class Trainer:
             shuffle=False,
             num_workers=config.system.num_workers,
             pin_memory=pin,
+            drop_last=False,
         )
 
         # Training state
@@ -329,127 +246,13 @@ class Trainer:
             print(f"LoRA alpha: {self.config.model.lora_alpha}")
     
     def train_epoch(self) -> Dict[str, float]:
-        """Train for one epoch"""
-        if self.config.model.use_ingredient_head:
-            return self._train_epoch_ingredient()
-        self.model.train()
-        epoch_loss = 0.0
-        epoch_dice_loss = 0.0
-        epoch_bce_loss = 0.0
-        num_batches = len(self.train_loader)
-        
-        progress_bar = tqdm.tqdm(self.train_loader, desc=f"Training Epoch {self.current_epoch}")
-        
-        for batch_idx, batch in enumerate(progress_bar):
-            # Move batch to device
-            image = batch['image'].to(self.device)
-            mask = batch['mask'].to(self.device)
-            
-            # Zero gradients
-            self.optimizer.zero_grad()
-            
-            # Forward pass with mixed precision
-            with autocast(device_type=self.device.type, enabled=self.config.training.use_mixed_precision):
-                # Get image features
-                image_features = self.model.image_encoder(image)
-                
-                # Prepare prompts
-                prompts = {
-                    'points': batch['prompts']['points'].to(self.device),
-                    'point_labels': batch['prompts']['point_labels'].to(self.device)
-                }
-                
-                # Get predictions (upsampled to ground-truth resolution)
-                pred_masks = self.model.sam_model(image_features, prompts)
-                pred_masks = self.model.resize_predictions(pred_masks, mask.shape[-2:])
-                
-                # Calculate loss
-                losses = self.criterion(pred_masks.squeeze(1), mask)
-            
-            # Backward pass
-            self.scaler.scale(losses['total_loss']).backward()
-            
-            # Gradient accumulation
-            if (batch_idx + 1) % self.config.training.gradient_accumulation_steps == 0:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
-            
-            # Update running statistics
-            epoch_loss += losses['total_loss'].item()
-            epoch_dice_loss += losses['dice_loss'].item()
-            epoch_bce_loss += losses['bce_loss'].item()
-            
-            # Update progress bar
-            progress_bar.set_postfix({
-                'Loss': f"{losses['total_loss'].item():.4f}",
-                'Dice': f"{losses['dice_loss'].item():.4f}",
-                'BCE': f"{losses['bce_loss'].item():.4f}",
-                'LR': f"{self.optimizer.param_groups[0]['lr']:.6f}"
-            })
-            
-            # Log at specified frequency
-            if (batch_idx + 1) % self.config.training.log_frequency == 0:
-                self._log_batch(batch_idx, losses, num_batches)
-        
-        # Calculate epoch averages
-        avg_loss = epoch_loss / num_batches
-        avg_dice_loss = epoch_dice_loss / num_batches
-        avg_bce_loss = epoch_bce_loss / num_batches
-        
-        return {
-            'train_loss': avg_loss,
-            'train_dice_loss': avg_dice_loss,
-            'train_bce_loss': avg_bce_loss,
-            'learning_rate': self.optimizer.param_groups[0]['lr']
-        }
-    
+        """Train for one epoch (FoodInsSeg + ingredient head)."""
+        return self._train_epoch_ingredient()
+
     def validate_epoch(self) -> Dict[str, float]:
-        """Validate for one epoch"""
-        if self.config.model.use_ingredient_head:
-            return self._validate_epoch_ingredient()
-        self.model.eval()
-        total_miou = 0.0
-        total_dice = 0.0
-        num_samples = 0
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm.tqdm(self.val_loader, desc="Validation")):
-                # Move batch to device
-                image = batch['image'].to(self.device)
-                mask = batch['mask'].to(self.device)
-                
-                # Get image features
-                image_features = self.model.image_encoder(image)
-                
-                # Prepare prompts
-                prompts = {
-                    'points': batch['prompts']['points'].to(self.device),
-                    'point_labels': batch['prompts']['point_labels'].to(self.device)
-                }
-                
-                # Get predictions and resize to ground-truth resolution
-                pred_masks = self.model.sam_model(image_features, prompts)
-                pred_masks = self.model.resize_predictions(pred_masks, mask.shape[-2:])
-                pred_masks_sigmoid = torch.sigmoid(pred_masks.squeeze(1))
-                
-                # Calculate metrics
-                miou = calculate_miou(pred_masks_sigmoid, mask)
-                dice = calculate_dice(pred_masks_sigmoid, mask)
-                
-                total_miou += miou.item() * image.size(0)
-                total_dice += dice.item() * image.size(0)
-                num_samples += image.size(0)
-        
-        # Calculate epoch averages
-        avg_miou = total_miou / num_samples
-        avg_dice = total_dice / num_samples
-        
-        return {
-            'val_miou': avg_miou,
-            'val_dice': avg_dice
-        }
-    
+        """Validate for one epoch (FoodInsSeg metrics, or FoodSeg103 binary if configured)."""
+        return self._validate_epoch_ingredient()
+
     def _train_epoch_ingredient(self) -> Dict[str, float]:
         """Train for one epoch using joint instance mask + ingredient classification loss."""
         self.model.train()
