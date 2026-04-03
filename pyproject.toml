@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "sam4food"
 version = "0.1.0"
-description = "Fine-tuning SAM with LoRA for food image segmentation (FoodSeg103 / FoodInsSeg)"
+description = "Fine-tuning SAM with LoRA for food image segmentation (FoodInsSeg; FoodSeg103 optional for validation/eval)"
 readme = "README.md"
 license = "MIT"
 package-mode = false

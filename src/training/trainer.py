@@ -1,8 +1,9 @@
 """
 Training Pipeline for SAM with LoRA Fine-tuning
 
-This module implements the training loop for fine-tuning SAM on FoodSeg103
-with LoRA adapters and specified hyperparameters.
+This module implements the training loop for fine-tuning SAM on FoodInsSeg
+with LoRA adapters and specified hyperparameters. Optional FoodSeg103 validation
+uses binary mask metrics only (no ingredient labels).
 """
 
 import torch
@@ -21,7 +22,6 @@ from datetime import datetime
 import json
 
 from ..models.sam_lora import SAMLoRAModel
-from ..data.foodseg_dataset import create_data_loaders
 from configs.config import Config
 from ..utils.metrics import (
     calculate_miou,
@@ -153,27 +153,49 @@ class Trainer:
         else:
             self.scaler = GradScaler('cpu', enabled=False)
         
-        # Initialize data loaders
-        if config.data.dataset_name == "FoodInsSeg":
-            from ..data.foodinsseg_dataset import FoodInsSegDataset
-            train_dataset = FoodInsSegDataset(config, split="train")
-            val_dataset = FoodInsSegDataset(config, split="val")
-            self.train_loader = DataLoader(
-                train_dataset,
-                batch_size=config.training.batch_size,
-                shuffle=True,
-                num_workers=config.system.num_workers,
-                pin_memory=True,
+        # Initialize data loaders (training: FoodInsSeg only)
+        if config.data.dataset_name != "FoodInsSeg":
+            raise ValueError(
+                "Training targets FoodInsSeg only. "
+                f"Got dataset_name={config.data.dataset_name!r}. "
+                "Use --foodseg103_validation_path to validate on FoodSeg103, or eval with --dataset_name FoodSeg103."
             )
-            self.val_loader = DataLoader(
-                val_dataset,
-                batch_size=config.training.batch_size,
-                shuffle=False,
-                num_workers=config.system.num_workers,
-                pin_memory=True,
-            )
+
+        from ..data.foodinsseg_dataset import FoodInsSegDataset
+        from ..data.foodseg_dataset import FoodSeg103Dataset
+
+        self._val_uses_foodseg103_binary = False
+        train_dataset = FoodInsSegDataset(config, split="train")
+        fv = getattr(config.data, "foodseg103_validation_path", None)
+        if fv and str(fv).strip():
+            p = Path(fv)
+            if p.is_dir() and (p / "ImageSets" / "test.txt").is_file():
+                val_dataset = FoodSeg103Dataset(config, split="val")
+                self._val_uses_foodseg103_binary = True
+            else:
+                print(
+                    f"Warning: foodseg103_validation_path={fv} is missing ImageSets/test.txt; "
+                    "using FoodInsSeg validation split."
+                )
+                val_dataset = FoodInsSegDataset(config, split="val")
         else:
-            self.train_loader, self.val_loader = create_data_loaders(config)
+            val_dataset = FoodInsSegDataset(config, split="val")
+
+        pin = config.system.device == "cuda"
+        self.train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=True,
+            num_workers=config.system.num_workers,
+            pin_memory=pin,
+        )
+        self.val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=False,
+            num_workers=config.system.num_workers,
+            pin_memory=pin,
+        )
 
         # Training state
         self.current_epoch = 0
@@ -518,8 +540,47 @@ class Trainer:
             'learning_rate': self.optimizer.param_groups[0]['lr'],
         }
 
+    def _validate_epoch_binary_foodseg103(self) -> Dict[str, float]:
+        """Validation on FoodSeg103 (binary masks); mask IoU/Dice only — no ingredient accuracy."""
+        self.model.eval()
+        total_miou = 0.0
+        total_dice = 0.0
+        num_samples = 0
+
+        with torch.no_grad():
+            for batch in tqdm.tqdm(
+                self.val_loader, desc="Validation [FoodSeg103 binary]"
+            ):
+                image = batch["image"].to(self.device)
+                mask = batch["mask"].to(self.device)
+
+                image_features = self.model.image_encoder(image)
+                prompts = {
+                    "points": batch["prompts"]["points"].to(self.device),
+                    "point_labels": batch["prompts"]["point_labels"].to(self.device),
+                }
+                pred_masks = self.model.sam_model(image_features, prompts)
+                pred_masks = self.model.resize_predictions(pred_masks, mask.shape[-2:])
+                pred_masks_sigmoid = torch.sigmoid(pred_masks.squeeze(1))
+
+                miou = calculate_miou(pred_masks_sigmoid, mask)
+                dice = calculate_dice(pred_masks_sigmoid, mask)
+
+                total_miou += miou.item() * image.size(0)
+                total_dice += dice.item() * image.size(0)
+                num_samples += image.size(0)
+
+        return {
+            "val_miou": total_miou / num_samples,
+            "val_dice": total_dice / num_samples,
+            "val_acc": 0.0,
+        }
+
     def _validate_epoch_ingredient(self) -> Dict[str, float]:
         """Validate for one epoch in ingredient mode."""
+        if getattr(self, "_val_uses_foodseg103_binary", False):
+            return self._validate_epoch_binary_foodseg103()
+
         self.model.eval()
         total_iou = 0.0
         total_dice = 0.0

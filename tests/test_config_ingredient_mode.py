@@ -12,12 +12,13 @@ from main import parse_arguments, setup_config
 def test_ingredient_mode_defaults_are_available():
     config = Config()
 
-    assert config.model.use_ingredient_head is False
+    assert config.model.use_ingredient_head is True
     assert config.model.num_ingredient_classes == 103
     assert config.model.ingredient_head_hidden_dim == 256
     assert config.training.classification_loss_weight == 1.0
     assert config.training.mask_loss_weight == 1.0
-    assert config.data.dataset_name == "FoodSeg103"
+    assert config.data.dataset_name == "FoodInsSeg"
+    assert config.data.foodseg103_validation_path is None
     assert config.inference.use_prompted_aggregation is True
     assert config.inference.aggregation_score_threshold == 0.5
     assert config.inference.aggregation_iou_threshold == 0.5

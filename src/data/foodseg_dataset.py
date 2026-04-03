@@ -52,14 +52,13 @@ class FoodSeg103Dataset(Dataset):
         print(f"Loaded {len(self.annotations)} samples for {split} split")
         
     def _setup_dataset_path(self) -> Path:
-        """Setup dataset download and path"""
-        if self.config.data.dataset_path:
-            dataset_path = Path(self.config.data.dataset_path)
-        else:
-            # Use default path
-            dataset_path = Path("data/FoodSeg103")
-            
-        return dataset_path
+        """Resolve FoodSeg103 root (validation / eval paths — not used for FoodInsSeg training)."""
+        fv = getattr(self.config.data, "foodseg103_validation_path", None)
+        if fv and str(fv).strip():
+            return Path(fv)
+        if getattr(self.config.data, "dataset_name", "") == "FoodSeg103" and self.config.data.dataset_path:
+            return Path(self.config.data.dataset_path)
+        return Path("data/FoodSeg103")
     
     def _load_annotations(self) -> List[Dict]:
         """Load annotations from the dataset using ImageSets/*.txt files"""
@@ -439,29 +438,31 @@ def create_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
     return train_loader, val_loader
 
 
-def download_foodseg103_dataset() -> Path:
+def download_foodseg103_dataset(dataset_path: Optional[Union[str, Path]] = None) -> Path:
     """
-    Download the FoodSeg103 dataset
-    This is a placeholder for the actual download process
+    Clone FoodSeg103 into ``dataset_path`` (default ``data/FoodSeg103``).
+    Intended for validation/eval — training uses FoodInsSeg only.
     """
     import subprocess
-    
+
     dataset_url = "https://github.com/L1016517444/FoodSeg103.git"
-    dataset_path = Path("data/FoodSeg103")
-    
+    dataset_path = Path(dataset_path or "data/FoodSeg103")
+
     print("Downloading FoodSeg103 dataset...")
     print("Note: Please download the dataset manually from:")
     print("https://github.com/L1016517444/FoodSeg103")
     print(f"Expected location: {dataset_path}")
-    
-    # Try to clone if git repo
+
     try:
-        subprocess.run(["git", "clone", dataset_url, str(dataset_path)], 
-                      check=True, capture_output=True)
+        subprocess.run(
+            ["git", "clone", dataset_url, str(dataset_path)],
+            check=True,
+            capture_output=True,
+        )
         print("Dataset downloaded successfully!")
     except subprocess.CalledProcessError:
         print("Automatic download failed. Please download manually.")
-        
+
     return dataset_path
 
 

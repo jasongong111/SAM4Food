@@ -14,7 +14,7 @@ class ModelConfig:
     sam_model_name: str = "vit_b"  # Options: vit_b, vit_l, vit_h
     sam_checkpoint_path: Optional[str] = None  # Must be provided manually - download from https://dl.fbaipublicfiles.com/segment_anything/
     trained_checkpoint_path: Optional[str] = None
-    use_ingredient_head: bool = False
+    use_ingredient_head: bool = True
     num_ingredient_classes: int = 103
     ingredient_head_hidden_dim: int = 256
     
@@ -60,14 +60,17 @@ class TrainingConfig:
 @dataclass
 class DataConfig:
     """Configuration for dataset and data loading"""
-    # Dataset paths
-    dataset_name: str = "FoodSeg103"
-    dataset_path: Optional[str] = None  # Will be downloaded automatically
-    
-    # Split information (as specified in the project)
+    # Training uses FoodInsSeg (instance + ingredient labels). FoodSeg103 is not used for training.
+    dataset_name: str = "FoodInsSeg"
+    dataset_path: Optional[str] = None  # FoodInsSeg root; auto-download if unset when training
+
+    # Optional: FoodSeg103 root for validation-only (binary masks). If None, validation uses FoodInsSeg (test split).
+    foodseg103_validation_path: Optional[str] = None
+
+    # Reference sizes (FoodInsSeg — see project docs)
     train_size: int = 4983
     val_size: int = 2135
-    test_size: int = 0  # Not specified in the proposal
+    test_size: int = 0
     
     # Dataset subset for training (use only a fraction of training data)
     train_subset_fraction: float = 0.1  # Use 10% of training dataset

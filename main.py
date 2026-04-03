@@ -2,7 +2,8 @@
 Main Execution Script for SAM Food Segmentation Project
 
 This script provides the complete pipeline for training and evaluating
-the SAM model with LoRA adaptation on the FoodSeg103 dataset.
+the SAM model with LoRA adaptation on FoodInsSeg (food instance + ingredient labels).
+FoodSeg103 is supported for optional validation or eval/visualize, not for training.
 """
 
 import argparse
@@ -161,12 +162,22 @@ Examples:
         '--dataset_name',
         type=str,
         default=None,
-        help='Dataset identifier to use (e.g. FoodSeg103 or FoodInsSeg)'
+        help='Dataset for eval/visualize (training always uses FoodInsSeg), e.g. FoodInsSeg or FoodSeg103'
     )
     parser.add_argument(
         '--dataset_path',
         type=str,
-        help='Path to dataset root'
+        help='Path to FoodInsSeg dataset root (training)'
+    )
+    parser.add_argument(
+        '--foodseg103_validation_path',
+        type=str,
+        default=None,
+        help=(
+            'Optional FoodSeg103 root for validation during training (binary mask metrics only). '
+            'Default: config (None = validate on FoodInsSeg test split). '
+            'Use download_foodseg103_dataset() or git clone to populate.'
+        ),
     )
     parser.add_argument(
         '--image_size',
@@ -287,6 +298,8 @@ def setup_config(args) -> Config:
     if args.dataset_name:
         config.data.dataset_name = args.dataset_name
     config.data.dataset_path = args.dataset_path
+    if args.foodseg103_validation_path is not None:
+        config.data.foodseg103_validation_path = args.foodseg103_validation_path
     config.data.input_size = args.image_size
     
     # Update system configuration
@@ -345,27 +358,41 @@ def setup_wandb(config, args):
 
 
 def download_dataset_if_needed(config, args):
-    """Download dataset if not available"""
+    """Download FoodInsSeg for training if path is unset."""
     if config.data.dataset_path is None:
-        if config.data.dataset_name == "FoodSeg103":
-            dataset_path = download_foodseg103_dataset()
-            config.data.dataset_path = str(dataset_path)
-        elif config.data.dataset_name == "FoodInsSeg":
-            dataset_path = download_foodinsseg_dataset()
-            config.data.dataset_path = str(dataset_path)
-        else:
+        if config.data.dataset_name != "FoodInsSeg":
             raise ValueError(
-                f"Dataset path must be provided for dataset '{config.data.dataset_name}'"
+                f"Training expects FoodInsSeg; set dataset_path or use dataset_name FoodInsSeg. "
+                f"Got {config.data.dataset_name!r}."
             )
+        dataset_path = download_foodinsseg_dataset()
+        config.data.dataset_path = str(dataset_path)
+
+
+def ensure_foodseg103_validation_data(config) -> None:
+    """Clone FoodSeg103 into ``foodseg103_validation_path`` if that path is set but incomplete."""
+    fv = getattr(config.data, "foodseg103_validation_path", None)
+    if not fv or not str(fv).strip():
+        return
+    root = Path(fv)
+    marker = root / "ImageSets" / "test.txt"
+    if marker.is_file():
+        return
+    print(
+        f"FoodSeg103 validation data not found at {root} (expected ImageSets/test.txt). "
+        "Attempting git clone..."
+    )
+    download_foodseg103_dataset(root)
 
 
 def train_model(config, args):
     """Train the model"""
     print("Starting training...")
     
-    # Download dataset if needed
+    # Download datasets if needed
     download_dataset_if_needed(config, args)
-    
+    ensure_foodseg103_validation_data(config)
+
     # Setup training
     trainer = Trainer(config)
     

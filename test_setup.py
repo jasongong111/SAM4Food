@@ -148,8 +148,8 @@ def main():
     if passed == total:
         print("🎉 All tests passed! Project is ready to use.")
         print("\nNext steps:")
-        print("1. Download FoodSeg103 dataset")
-        print("2. Run: python main.py --mode train --model_name vit_b --epochs 50")
+        print("1. Training uses FoodInsSeg; optionally clone FoodSeg103 for validation (see --foodseg103_validation_path)")
+        print("2. Run: python main.py --mode train --sam_checkpoint sam_vit_b_01ec64.pth --epochs 50")
     else:
         print("❌ Some tests failed. Please check the setup.")
         return 1
