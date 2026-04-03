@@ -563,10 +563,22 @@ class Trainer:
             'val_history': self.val_history
         }
     
+    @staticmethod
+    def _config_to_dict(config) -> dict:
+        """Serialize a Config object to a plain JSON-safe dict."""
+        import dataclasses
+        result = {}
+        for key, val in config.__dict__.items():
+            if dataclasses.is_dataclass(val):
+                result[key] = dataclasses.asdict(val)
+            else:
+                result[key] = val
+        return result
+
     def _save_training_history(self):
         """Save training history to JSON file"""
         history = {
-            'config': self.config.__dict__,
+            'config': self._config_to_dict(self.config),
             'train_history': self.train_history,
             'val_history': self.val_history,
             'best_miou': self.best_miou,
